@@ -1297,7 +1297,7 @@ def main():
     )
     
     # Training parameters
-    n_episodes = 1000
+    n_episodes = 5000
     max_steps_per_episode = len(load.time_series)
     
     # Define load demand and PV generation
