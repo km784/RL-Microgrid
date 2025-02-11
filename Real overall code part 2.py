@@ -637,20 +637,12 @@ class MicrogridState:
         
         # Calculate proximity to theoretical minimum
         cost_difference = actual_cost - theoretical_min
-        proximity_ratio = cost_difference / theoretical_min if theoretical_min > 0 else 1
         
-        # Smooth reward calculation based on proximity to theoretical minimum
-        if actual_cost < theoretical_min:
-            # Strong penalty for going below theoretical minimum
-            cost_reward = -100 * (1 + proximity_ratio)
+       # Reward increases as cost gets closer to theoretical minimum
+        if actual_cost == theoretical_min:
+            cost_reward = 100  # Maximum reward when cost is at or below theoretical minimum
         else:
-            # Reward increases as cost approaches theoretical minimum
-            # Using exponential decay for smooth transition
-            cost_reward = 50 * np.exp(-2 * proximity_ratio)
-            
-            # Additional reward for being close to but not below theoretical minimum
-            if 0 <= proximity_ratio <= 0.1:  # Within 10% of theoretical minimum
-                cost_reward += 20 * (1 - proximity_ratio/0.1)
+            cost_reward = 100 * (1 - cost_difference / theoretical_min)  # Linearly decrease reward as cost increases
         
         # Strategic battery management rewards
         strategic_reward = 0
