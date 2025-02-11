@@ -616,13 +616,7 @@ class MicrogridState:
 
     def calculate_reward(self, control_dict):
         """
-        Calculate reward based on cost minimization and strategic battery management.
-        
-        Args:
-            control_dict (dict): Dictionary containing battery control actions
-            
-        Returns:
-            tuple: (reward, cost) where reward is the calculated reward value and cost is the actual cost incurred
+        Improved reward calculation with smooth convergence to theoretical minimum.
         """
         # Get current tariff rates
         tariff = self.get_current_tariff()
@@ -639,11 +633,24 @@ class MicrogridState:
         # Calculate theoretical minimum cost for current timestep
         current_pv = self.state_space['pv_power']
         current_load = self.state_space['load_demand']
-        theoretical_min_cost = min_cost([current_pv], [current_load])
+        theoretical_min = min_cost([current_pv], [current_load])
         
-        # Base reward component from cost reduction
-        cost_efficiency = max(0, 1 - (actual_cost / theoretical_min_cost if theoretical_min_cost > 0 else 1))
-        cost_reward = 50 * cost_efficiency  # Scale factor of 50 to make cost reduction significant
+        # Calculate proximity to theoretical minimum
+        cost_difference = actual_cost - theoretical_min
+        proximity_ratio = cost_difference / theoretical_min if theoretical_min > 0 else 1
+        
+        # Smooth reward calculation based on proximity to theoretical minimum
+        if actual_cost < theoretical_min:
+            # Strong penalty for going below theoretical minimum
+            cost_reward = -100 * (1 + proximity_ratio)
+        else:
+            # Reward increases as cost approaches theoretical minimum
+            # Using exponential decay for smooth transition
+            cost_reward = 50 * np.exp(-2 * proximity_ratio)
+            
+            # Additional reward for being close to but not below theoretical minimum
+            if 0 <= proximity_ratio <= 0.1:  # Within 10% of theoretical minimum
+                cost_reward += 20 * (1 - proximity_ratio/0.1)
         
         # Strategic battery management rewards
         strategic_reward = 0
@@ -653,41 +660,41 @@ class MicrogridState:
         # Peak hours check (7-11 and 17-21)
         is_peak = (7 <= hour < 11) or (17 <= hour < 21)
         
-        # Reward for appropriate battery use during peak/off-peak
+        # Modified peak/off-peak rewards
         if is_peak:
-            if control_dict['battery_discharge'] > 0:  # Discharging during peak
-                strategic_reward += 20
-            elif control_dict['battery_charge'] > 0:  # Penalize charging during peak
-                strategic_reward -= 10
-        else:  # Off-peak
+            if control_dict['battery_discharge'] > 0:
+                strategic_reward += 15  # Slightly reduced peak discharge reward
+            elif control_dict['battery_charge'] > 0:
+                strategic_reward -= 15  # Increased penalty for peak charging
+        else:
             if control_dict['battery_charge'] > 0 and current_soc < self.SOC_OPTIMAL_MAX:
-                strategic_reward += 10
-            elif control_dict['battery_discharge'] > 0 and current_soc > self.SOC_OPTIMAL_MIN:
-                strategic_reward -= 5
-
-        # Battery health management reward
+                strategic_reward += 15  # Increased off-peak charging reward
+            elif control_dict['battery_discharge'] > 0:
+                strategic_reward -= 10  # Increased penalty for off-peak discharge
+        
+        # Battery health management with smoother transitions
         soc_reward = 0
         if self.SOC_OPTIMAL_MIN <= current_soc <= self.SOC_OPTIMAL_MAX:
-            soc_reward += 10
-        elif current_soc < self.SOC_MIN or current_soc > self.SOC_MAX:
-            soc_reward -= 20
+            soc_reward += 15
+        else:
+            # Gradual penalty based on distance from optimal range
+            distance_from_optimal = min(
+                abs(current_soc - self.SOC_OPTIMAL_MIN),
+                abs(current_soc - self.SOC_OPTIMAL_MAX)
+            )
+            soc_reward -= 15 * (distance_from_optimal / 0.1)  # Gradual penalty
         
-        # Degradation penalty
-        degradation_penalty = -10 * self.last_degradation if self.last_degradation > 0.1 else 0
-        
-        # Combine all reward components
+        # Combine rewards with adjusted weights
         total_reward = (
-            cost_reward +           # Cost efficiency (0-50)
-            strategic_reward +      # Peak/off-peak strategy (-10 to +20)
-            soc_reward +           # Battery health management (-20 to +10)
-            degradation_penalty    # Battery degradation (negative value)
+            cost_reward * 1.2 +      # Increased emphasis on cost
+            strategic_reward +        # Keep strategic rewards as is
+            soc_reward * 0.8         # Slightly reduced SOC influence
         )
         
-        # Clip reward to prevent extreme values
-        total_reward = max(-100, min(100, total_reward))
+        # Smooth clipping of rewards
+        total_reward = np.clip(total_reward, -100, 100)
         
         return total_reward, actual_cost
-                     
         
     def calculate_theoretical_min_cost(self, pv_generation, load_demand):
         """
@@ -744,38 +751,58 @@ class MicrogridState:
         
         return total_cost
 
-class QLearningAgent:       # creates Q-table and sets learning and exploration parameters
+class QLearningAgent:
     def __init__(self, n_states, n_actions, learning_rate, discount_factor, epsilon):
         self.q_table = np.zeros((n_states, n_actions))
         self.learning_rate = learning_rate
         self.discount_factor = discount_factor
         self.epsilon = epsilon
-        self.epsilon_decay = 0.995
-        self.epsilon_min = 0.01
+        # Modified epsilon decay for more stable late-stage learning
+        self.epsilon_decay = 0.998  # Slower decay
+        self.epsilon_min = 0.02    # Slightly higher minimum exploration
+        
+        # Add experience tracking
+        self.experience_count = np.zeros((n_states, n_actions))
         
     def get_state_index(self, state):
         battery, pv, load, time = state  # Components
         return battery * (3 * 3 * 4) + pv * (3 * 4) + load * 4 + time
     
-    def choose_action(self, state):                          # Implements epsilon-greedy strategy 
-        if np.random.random() < self.epsilon:
-            return np.random.randint(0, self.q_table.shape[1])     
+    def choose_action(self, state):
         state_idx = self.get_state_index(state)
+        
+        # Modified exploration strategy
+        if np.random.random() < self.epsilon:
+            # Prioritize less-explored actions during exploration
+            if np.random.random() < 0.3:  # 30% of exploration targets less visited actions
+                action_counts = self.experience_count[state_idx]
+                least_visited = np.where(action_counts == action_counts.min())[0]
+                return np.random.choice(least_visited)
+            return np.random.randint(0, self.q_table.shape[1])
+        
         return int(np.argmax(self.q_table[state_idx, :]))
     
-    def learn(self, state, action, reward, next_state):                # Updates Q-values using on Bellman equation
-        state_idx = self.get_state_index(state)                        # future reward and immediate reward
+    def learn(self, state, action, reward, next_state):
+        state_idx = self.get_state_index(state)
         next_state_idx = self.get_state_index(next_state)
+        
+        # Update experience count
+        self.experience_count[state_idx, action] += 1
+        
+        # Calculate new Q-value with experience-based learning rate
+        visits = self.experience_count[state_idx, action]
+        adaptive_lr = self.learning_rate * (1 / (1 + 0.1 * np.log(1 + visits)))
         
         old_q = self.q_table[state_idx, action]
         next_max_q = np.max(self.q_table[next_state_idx, :])
-        new_q = (1 - self.learning_rate) * old_q + \
-                self.learning_rate * (reward + self.discount_factor * next_max_q)      # Q-learning fomrmula
+        new_q = (1 - adaptive_lr) * old_q + \
+                adaptive_lr * (reward + self.discount_factor * next_max_q)
         
         self.q_table[state_idx, action] = new_q
         
     def decay_epsilon(self):
-        self.epsilon = max(self.epsilon_min, self.epsilon * self.epsilon_decay)      # Exploration vs exploitation, agent starts to exploit when gains more knowledge
+        # Modified epsilon decay with episode count consideration
+        self.epsilon = max(self.epsilon_min, self.epsilon * self.epsilon_decay)     # Exploration vs exploitation, agent starts to exploit when gains more knowledge
 
 def train_microgrid(env, agent, n_episodes, max_steps):
     episode_rewards = []
@@ -1291,13 +1318,13 @@ def main():
     agent = QLearningAgent(
         n_states=5*3*3*4,
         n_actions=2,
-        learning_rate=0.2,
+        learning_rate=0.1,
         discount_factor=0.99,
         epsilon=1.0
     )
     
     # Training parameters
-    n_episodes = 5000
+    n_episodes = 4000
     max_steps_per_episode = len(load.time_series)
     
     # Define load demand and PV generation
