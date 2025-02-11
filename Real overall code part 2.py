@@ -1086,7 +1086,7 @@ def plot_tariff_battery_relationship(env, battery_data, episodes_to_compare=[10,
     
     return plt.gcf()
 
-def plot_battery_actions_soc_comparison(env, battery_data, episodes_to_compare=[10, 99], save_path=None):
+def plot_battery_actions_soc_comparison(env, battery_data, episodes_to_compare=[100, 1999], save_path=None):
     """
     Create a visualization comparing agent behavior across different episodes
     to demonstrate learning progress
@@ -1205,9 +1205,9 @@ def plot_battery_actions_soc_comparison(env, battery_data, episodes_to_compare=[
     # Add learning progress summary
     summary_text = (
         f"Learning Progress:\n"
-        f"Optimal Range Time: {learning_metrics[10]['optimal_range_time']:.1f}% → {learning_metrics[99]['optimal_range_time']:.1f}%\n"
-        f"Strategic Peak Discharges: {learning_metrics[10]['peak_discharges']} → {learning_metrics[99]['peak_discharges']}\n"
-        f"Strategic Off-Peak Charges: {learning_metrics[10]['off_peak_charges']} → {learning_metrics[99]['off_peak_charges']}"
+        f"Optimal Range Time: {learning_metrics[100]['optimal_range_time']:.1f}% → {learning_metrics[1999]['optimal_range_time']:.1f}%\n"
+        f"Strategic Peak Discharges: {learning_metrics[100]['peak_discharges']} → {learning_metrics[1999]['peak_discharges']}\n"
+        f"Strategic Off-Peak Charges: {learning_metrics[100]['off_peak_charges']} → {learning_metrics[1999]['off_peak_charges']}"
     )
     
     plt.figtext(0.02, 0.02, summary_text,
@@ -1316,7 +1316,7 @@ def main():
     )
     
     # Training parameters
-    n_episodes = 4000
+    n_episodes = 2000
     max_steps_per_episode = len(load.time_series)
     
     # Define load demand and PV generation
