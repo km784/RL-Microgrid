@@ -192,19 +192,12 @@ class MicrogridState:
         else:
             battery_state = 4    # Critical - above maximum
             
-        if self.state_space['pv_power'] < 20:
+        if self.state_space['pv_power'] == 0:
             pv_state = 0        # Low generation
-        elif self.state_space['pv_power'] < 35:
-            pv_state = 1        # Medium generation
-        else:
-            pv_state = 2        # High generation
             
-        if self.state_space['load_demand'] < 25:
+        if self.state_space['load_demand'] == 30:
             load_state = 0      # Low demand
-        elif self.state_space['load_demand'] < 45:
-            load_state = 1      # Medium demand
-        else:
-            load_state = 2      # High demand
+        
             
         if self.state_space['time_hour'] < 6:
             time_state = 0      # Night
@@ -394,31 +387,59 @@ class MicrogridState:
         
     def min_cost(self, pv_generation, load_demand):
         """
-        Calculate the theoretical minimum cost with no PV generation
-        """
-        pv_generation = np.array(pv_generation)
-        load_demand = np.array(load_demand)
+        Calculate the theoretical minimum cost considering optimal battery usage:
+        - Buy (charge) during off-peak hours
+        - Sell (discharge) during peak hours
         
-        # With no PV generation, the theoretical minimum is simply
-        # satisfying all load at the cheapest possible rate
-        absolute_min_cost = 0
+        Args:
+            pv_generation: List of PV generation values for each hour
+            load_demand: List of load demand values for each hour
+        
+        Returns:
+            float: Theoretical minimum cost
+        """
+        total_cost = 0
+        
+        # Battery parameters
+        max_discharge_per_peak = min(
+            self.battery.max_discharge,  # Max discharge rate
+            self.battery.max_capacity * (self.SOC_MAX - self.SOC_MIN) / 2  # Available capacity split between two peak periods
+        )
         
         for hour in range(24):
-            # Check if it's peak or off-peak
+            # Determine if current hour is peak
             is_peak = (7 <= hour < 11) or (17 <= hour < 21)
-            rate = 0.17 if is_peak else 0.13  # Peak or off-peak rate
             
-            # Cost of satisfying load for this hour
-            absolute_min_cost += load_demand[hour] * rate
-                        
-        return absolute_min_cost
+            if is_peak:
+                # During peak hours:
+                # 1. Pay for load at peak rate
+                load_cost = load_demand[hour] * 0.17
+                # 2. Get revenue from battery discharge
+                battery_revenue = max_discharge_per_peak * 0.10
+                total_cost += load_cost - battery_revenue
+            else:
+                # During off-peak hours:
+                # 1. Pay for load at off-peak rate
+                load_cost = load_demand[hour] * 0.13
+                # 2. Pay for battery charging
+                if hour < 7:  # Morning charging for first peak
+                    battery_charge_cost = max_discharge_per_peak * 0.13
+                    total_cost += load_cost + battery_charge_cost
+                elif hour < 17:  # Afternoon charging for second peak
+                    battery_charge_cost = max_discharge_per_peak * 0.13
+                    total_cost += load_cost + battery_charge_cost
+                else:  # Night hours
+                    total_cost += load_cost
+        
+        return total_cost
+
 
 class QLearningAgent:
     def __init__(self, n_states, n_actions, learning_rate, discount_factor, epsilon):
         # Calculate the actual state space size based on the discrete state components
         self.battery_states = 5  # 0 to 4
-        self.pv_states = 3      # 0 to 2
-        self.load_states = 3    # 0 to 2
+        self.pv_states = 1      # 0 
+        self.load_states = 1   # 0 
         self.time_states = 4    # 0 to 3
         
         # Calculate total number of states
