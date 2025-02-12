@@ -1,63 +1,54 @@
-def calculate_theoretical_min_cost(env, pv_generation, load_demand):
-    """
-    Calculate the theoretical minimum cost possible for a 24-hour period
-    given perfect foresight and optimal battery operation.
-    """
-    min_cost = 0
-    battery_capacity = 100  # kWh
-    max_charge_rate = 50    # kW
-    max_discharge_rate = 50 # kW
-    battery_soc = 0.5 * battery_capacity  # Start at 50% SOC
-    
-    # Create arrays for peak and off-peak periods
-    hours = range(24)
-    peak_periods = [(7, 11), (17, 21)]
-    
-    # Sort periods by tariff rates for optimal charging/discharging
-    period_tariffs = []
-    for hour in hours:
-        is_peak = any(start <= hour < end for start, end in peak_periods)
-        if is_peak:
-            tariff = {
-                'hour': hour,
-                'consumption': 0.17,
-                'injection': 0.10
-            }
-        else:
-            tariff = {
-                'hour': hour,
-                'consumption': 0.13,
-                'injection': 0.07
-            }
-        period_tariffs.append(tariff)
-    
-    # Sort periods by price differential (best times to charge/discharge)
-    period_tariffs.sort(key=lambda x: x['injection'] - x['consumption'], reverse=True)
-    
-    # Calculate optimal battery operation for each hour
-    for period in period_tariffs:
-        hour = period['hour']
-        net_load = load_demand[hour] - pv_generation[hour]
-        
-        if period['injection'] > period['consumption']:
-            # Discharge during high price periods
-            max_discharge = min(
-                max_discharge_rate,
-                battery_soc - (env.SOC_MIN * battery_capacity)
-            )
-            discharge = min(max_discharge, load_demand[hour])
-            battery_soc -= discharge
-            revenue = discharge * period['injection']
-            min_cost -= revenue
-        else:
-            # Charge during low price periods
-            max_charge = min(
-                max_charge_rate,
-                (env.SOC_MAX * battery_capacity) - battery_soc
-            )
-            charge = min(max_charge, pv_generation[hour])
-            battery_soc += charge
-            cost = charge * period['consumption']
-            min_cost += cost
+def calculate_theoretical_min_cost(self, pv_generation, load_demand):
+            """
+            Calculate theoretical minimum cost with more realistic constraints
+            """
+            total_cost = 0
+            battery_soc = 0.5 * self.battery.max_capacity  # Initial SOC
             
-    return min_cost
+            # Create hourly periods with associated tariffs
+            periods = []
+            for hour in range(24):
+                is_peak = (7 <= hour < 11) or (17 <= hour < 21)
+                tariff = {
+                    'hour': hour,
+                    'consumption': 0.17 if is_peak else 0.13,
+                    'injection': 0.10 if is_peak else 0.07
+                }
+                # Add degradation cost to consumption price
+                tariff['effective_consumption'] = tariff['consumption'] + 0.01  # Account for battery wear
+                periods.append(tariff)
+            
+            # Sort periods by price differential (considering degradation)
+            periods.sort(key=lambda x: x['injection'] - x['effective_consumption'], reverse=True)
+            
+            for period in periods:
+                hour = period['hour']
+                net_load = load_demand[hour] - pv_generation[hour]
+                
+                # Consider battery operation costs in decision making
+                if period['injection'] > period['effective_consumption']:
+                    # Calculate optimal discharge amount
+                    max_discharge = min(
+                        self.battery.max_discharge,
+                        battery_soc - (0.2 * self.battery.max_capacity)
+                    )
+                    discharge = min(max_discharge, load_demand[hour])
+                    battery_soc -= discharge
+                    
+                    # Include degradation cost in revenue calculation
+                    revenue = discharge * (period['injection'] - 0.01)  # Subtract degradation cost
+                    total_cost -= revenue
+                else:
+                    # Calculate optimal charge amount
+                    max_charge = min(
+                        self.battery.max_charge,
+                        (0.9 * self.battery.max_capacity) - battery_soc
+                    )
+                    charge = min(max_charge, pv_generation[hour])
+                    battery_soc += charge
+                    
+                    # Include degradation cost in charging cost
+                    cost = charge * (period['consumption'] + 0.01)  # Add degradation cost
+                    total_cost += cost
+            
+            return total_cost
