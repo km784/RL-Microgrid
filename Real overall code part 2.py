@@ -292,11 +292,9 @@ class MicrogridState:
                     'grid_export': 0
                 }
                 
-        # Log the action results
-        # When calling the method, use the underscore
-        self.log_action_results(action_type, control_dict)
         return control_dict
         # Remove the underscore from the method definition
+        
     def calculate_reward(self, control_dict):
         """
         Calculate reward based on proximity to theoretical minimum cost.
