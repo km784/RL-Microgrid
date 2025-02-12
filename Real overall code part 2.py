@@ -9,10 +9,13 @@ import logging
 import pandas as pd
 import stat
 import os
-import logging
 from datetime import datetime
 import time
 from helper_functions import *
+
+log_dir = "logs"
+if not os.path.exists(log_dir):
+    os.makedirs(log_dir)
 
 battery = BatteryModule(
     min_capacity=0,
@@ -118,13 +121,32 @@ class BatteryDegradation:
         
 class MicrogridState:
     def __init__(self):
-            self.csv_headers = ['Episode', 'Step', 'Battery_SOC', 'PV_Power', 'Load_Demand', 
-                           'Time_Hour', 'Net_Load', 'Action', 'Reward','Battery_Degradation', 'Remaining_Capacity', 'Cycle_Count']
-            
-            self.MAX_PENALTY = 50 #max penalty set
-            
-            self.battery_data = []
-            
+        self.csv_headers = ['Episode', 'Step', 'Battery_SOC', 'PV_Power', 'Load_Demand', 
+                       'Time_Hour', 'Net_Load', 'Action', 'Reward','Battery_Degradation', 'Remaining_Capacity', 'Cycle_Count']
+        
+        self.MAX_PENALTY = 50 #max penalty set
+        self.battery_data = []
+        self.state_space = {
+            'battery_soc': 0.0,
+            'pv_power': 0.0,
+            'load_demand': 0.0,
+            'time_hour': 0,
+            'net_load': 0.0,
+            'battery_health': 100.0
+        }
+        self.battery_degradation = BatteryDegradation()
+        self.SOC_MIN = 0.2
+        self.SOC_OPTIMAL_MIN = 0.3
+        self.SOC_OPTIMAL_MAX = 0.85
+        self.SOC_MAX = 0.9
+        self.renewable = renewable
+        self.battery = battery
+        self.current_episode = 0
+        self.current_step = 0
+        self.last_action = None
+        self.last_reward = 0
+        self.last_cost = 0
+        self.last_degradation = 0
        
     def get_current_tariff(self):
         hour = self.state_space['time_hour']
@@ -314,7 +336,7 @@ class MicrogridState:
         # Calculate theoretical minimum cost for current timestep
         current_pv = self.state_space['pv_power']
         current_load = self.state_space['load_demand']
-        theoretical_min = min_cost([current_pv], [current_load])
+        theoretical_min = self.min_cost([current_pv], [current_load])  # Call min_cost as a method
 
         # Calculate proximity to theoretical minimum
         cost_difference = actual_cost - theoretical_min
@@ -368,9 +390,9 @@ class MicrogridState:
         total_reward = np.clip(total_reward, -100, 100)
 
         return total_reward, actual_cost
-                     
+                         
         
-    def min_cost(pv_generation, load_demand):
+    def min_cost(self, pv_generation, load_demand):
         """
         Calculate the theoretical minimum cost for a 24-hour period given perfect foresight
         and optimal battery operation.
@@ -400,6 +422,7 @@ class MicrogridState:
             raise ValueError("pv_generation and load_demand must contain 24 values (one for each hour)")
         
         total_cost = 0
+        total_revenue = 0
         
         # Define battery parameters
         battery_capacity = 120  # kWh
@@ -446,7 +469,7 @@ class MicrogridState:
                 
                 # Calculate revenue from discharging
                 revenue = discharge * period['injection']
-                total_cost -= revenue
+                total_revenue += revenue
                 
             else:
                 # During low-price periods, charge the battery
@@ -500,7 +523,6 @@ def train_microgrid(env, agent, n_episodes, max_steps):
     episode_costs = []  # Added to track costs
     env.battery_data = []
     for episode in range(n_episodes):
-        logger.info(f"Starting episode {episode}")
         
         env.current_episode = episode
         env.current_step = 0
@@ -531,7 +553,6 @@ def train_microgrid(env, agent, n_episodes, max_steps):
             episode_data.append(step_data)
             agent.learn(state, action, reward, next_state)
             state = next_state
-            env.log_state_to_csv()  # Log state after each step
             if done:
                 break
         # Convert episode data to DataFrame and append to battery_data list
@@ -542,7 +563,6 @@ def train_microgrid(env, agent, n_episodes, max_steps):
         episode_costs.append(total_cost)
         if episode % 100 == 0:
             avg_reward = np.mean(episode_rewards[-100:] if len(episode_rewards) >= 100 else episode_rewards)
-            logger.info(f"Episode {episode}, Average Reward: {avg_reward:.2f}, Epsilon: {agent.epsilon:.3f}")
    
     return episode_rewards, episode_costs, env.battery_data
 
@@ -609,11 +629,6 @@ def plot_soc_across_episodes(self, battery_data, save_path=None):
     try:
         # Convert list of DataFrames to a single DataFrame
         all_episodes_df = pd.concat(battery_data, ignore_index=True)
-        # Verify columns
-        logger.info(f"Available columns: {all_episodes_df.columns.tolist()}")
-        if 'Episode' not in all_episodes_df.columns:
-            logger.error("Episode column not found in DataFrame")
-            return None
         # Select the starting and final episodes to display
         start_episode = 10
         final_episode = all_episodes_df['Episode'].max()
@@ -898,9 +913,16 @@ def plot_battery_actions_soc_comparison(env, battery_data, episodes_to_compare=[
     
     return plt.gcf()
 
-def plot_convergence_to_min_cost(episode_rewards, episode_costs, min_cost, save_path=None):
+
+def plot_convergence_to_min_cost(episode_rewards, episode_costs, theoretical_min_cost, save_path=None):
     """
     Plot both rewards and costs compared to theoretical minimum.
+    
+    Args:
+        episode_rewards (list): List of rewards for each episode
+        episode_costs (list): List of costs for each episode
+        theoretical_min_cost (float): The theoretical minimum cost calculated
+        save_path (str, optional): Path to save the plot
     """
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10))
     
@@ -941,17 +963,17 @@ def plot_convergence_to_min_cost(episode_rewards, episode_costs, min_cost, save_
                 label=f'{window_size}-Episode Moving Average')
     
     # Plot minimum cost line
-    ax2.axhline(y=min_cost, color='#4CAF50', linestyle='--', 
+    ax2.axhline(y=theoretical_min_cost, color='#4CAF50', linestyle='--', 
                 label='Theoretical Minimum Cost')
     
     # Calculate convergence metrics
     if len(episode_costs) >= window_size:
         final_avg_cost = np.mean(episode_costs[-window_size:])
-        cost_gap = ((final_avg_cost - min_cost) / abs(min_cost)) * 100
+        cost_gap = ((final_avg_cost - absolute_min_cost) / abs(absolute_min_cost)) * 100
         
         stats_text = (
             f'Convergence Metrics:\n'
-            f'Theoretical Minimum: £{min_cost:.2f}\n'
+            f'Theoretical Minimum: £{theoretical_min_cost:.2f}\n'
             f'Final Avg Cost: £{final_avg_cost:.2f}\n'
             f'Gap to Minimum: {cost_gap:.1f}%'
         )
@@ -997,12 +1019,12 @@ def main():
     load_demand = [30] * 24
     pv_generation = 50*np.random.rand(24)
     
-    # Calculate theoretical minimum cost before plotting
-    min_cost = microgrid_env.min_cost(pv_generation, load_demand)
+    # Calculate theoretical minimum cost
+    theoretical_min_cost = microgrid_env.min_cost(pv_generation, load_demand)
     
-    # Train the agent - fix the unpacking to match the returned values
+    # Train the agent
     try:
-        episode_rewards, episode_costs, battery_data = train_microgrid(  # Modified this line
+        episode_rewards, episode_costs, battery_data = train_microgrid(
             env=microgrid_env,
             agent=agent,
             n_episodes=n_episodes,
@@ -1034,18 +1056,18 @@ def main():
             save_path=os.path.join(log_dir, 'battery_actions_soc.png')
         )
         
-        # Now we can use both episode_costs and min_cost in the convergence plot
+        # Pass the theoretical_min_cost to the convergence plot
         convergence_fig = plot_convergence_to_min_cost(
             episode_rewards,
-            episode_costs,  # Now we have this value properly unpacked
-            theoretical_min_cost,
+            episode_costs,
+            theoretical_min_cost,  # Now properly defined and passed
             save_path=os.path.join(log_dir, 'convergence.png')
         )
         
         plt.show()
     
     except Exception as e:
-        print (f"Error: {e}")
+        print(f"Error: {e}")
         
 if __name__ == "__main__":
     main()
