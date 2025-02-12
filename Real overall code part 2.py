@@ -637,12 +637,13 @@ class MicrogridState:
         current_load = self.state_space['load_demand']
         theoretical_min = min_cost([current_pv], [current_load])
         
-        # Calculate cost-based reward with increased weight for revenue
         cost_difference = actual_cost - theoretical_min
-        if grid_revenue > 0:  # Incentivize grid export
-            cost_reward = 150 * (grid_revenue / (tariff['injection'] * self.battery.max_discharge))
+
+        # Reward increases as cost gets closer to theoretical minimum
+        if actual_cost == theoretical_min:
+            cost_reward = 100  # Maximum reward when cost is at or below theoretical minimum
         else:
-            cost_reward = 100 * (1 - cost_difference / theoretical_min)
+            cost_reward = 100 * (1 - cost_difference / theoretical_min)  # Linearly decrease reward as cost increases
         
         # Strategic battery management rewards with higher peak discharge incentive
         strategic_reward = 0
@@ -655,14 +656,14 @@ class MicrogridState:
         if is_peak:
             if 'battery_discharge' in control_dict and control_dict['battery_discharge'] > 0:
                 # Increased reward for peak discharge
-                strategic_reward += 40 * (control_dict['battery_discharge'] / self.battery.max_discharge)
+                strategic_reward += 15 * (control_dict['battery_discharge'] / self.battery.max_discharge)
             elif 'battery_charge' in control_dict and control_dict['battery_charge'] > 0:
-                strategic_reward -= 25  # Increased penalty for peak charging
+                strategic_reward -= 15  # Increased penalty for peak charging
         else:
             if 'battery_charge' in control_dict and control_dict['battery_charge'] > 0 and current_soc < self.SOC_OPTIMAL_MAX:
-                strategic_reward += 20  # Increased off-peak charging reward
+                strategic_reward += 15  # Increased off-peak charging reward
             elif 'battery_discharge' in control_dict and control_dict['battery_discharge'] > 0:
-                strategic_reward -= 15  # Increased penalty for off-peak discharge
+                strategic_reward -= 10  # Increased penalty for off-peak discharge
         
         # Modified SOC reward with reduced penalties for peak-time discharge
         soc_reward = 0
@@ -685,9 +686,9 @@ class MicrogridState:
         
         # Combine rewards with adjusted weights
         total_reward = (
-            cost_reward * 1.5 +      # Increased weight for cost/revenue
-            strategic_reward * 1.2 +  # Increased weight for strategic actions
-            soc_reward * 0.6         # Reduced weight for SOC management
+            cost_reward * 1.2 +      # Increased weight for cost/revenue
+            strategic_reward +  # Increased weight for strategic actions
+            soc_reward * 0.8        # Reduced weight for SOC management
         )
         
         # Smooth clipping of rewards
