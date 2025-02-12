@@ -181,35 +181,41 @@ class MicrogridState:
         return self.discretize_state()
     
     def discretize_state(self):
-        if self.state_space['battery_soc'] < self.SOC_MIN:
-            battery_state = 0    # When below minimum point, damaging battery
-        elif self.state_space['battery_soc'] < self.SOC_OPTIMAL_MIN:
-            battery_state = 1    # lower than optiamum but alright
-        elif self.SOC_OPTIMAL_MIN <= self.state_space['battery_soc'] < self.SOC_OPTIMAL_MAX:
-            battery_state = 2    # Optimal range
-        elif self.state_space['battery_soc'] < self.SOC_MAX:
-            battery_state = 3    # High - approaching maximum
-        else:
-            battery_state = 4    # Critical - above maximum
-            
-        if self.state_space['pv_power'] == 0:
-            pv_state = 0        # Low generation
-            
-        if self.state_space['load_demand'] == 30:
-            load_state = 0      # Low demand
+   
         
-            
-        if self.state_space['time_hour'] < 6:
-            time_state = 0      # Night
-        elif self.state_space['time_hour'] < 12:
-            time_state = 1      # Morning
-        elif self.state_space['time_hour'] < 18:
-            time_state = 2      # Afternoon
+        # Battery state discretization
+        if self.state_space['battery_soc'] < self.SOC_MIN:
+            battery_state = 0
+        elif self.state_space['battery_soc'] < self.SOC_OPTIMAL_MIN:
+            battery_state = 1
+        elif self.SOC_OPTIMAL_MIN <= self.state_space['battery_soc'] < self.SOC_OPTIMAL_MAX:
+            battery_state = 2
+        elif self.state_space['battery_soc'] < self.SOC_MAX:
+            battery_state = 3
         else:
-            time_state = 3      # Evening
+            battery_state = 4
+       
+        
+        # PV state is always 0 since we only have one state
+        pv_state = 0
+
+        
+        # Load state is always 0 since we only have one state
+        load_state = 0
+       
+        
+        # Time state discretization
+        if self.state_space['time_hour'] < 6:
+            time_state = 0
+        elif self.state_space['time_hour'] < 12:
+            time_state = 1
+        elif self.state_space['time_hour'] < 18:
+            time_state = 2
+        else:
+            time_state = 3
             
         return (battery_state, pv_state, load_state, time_state)
-    
+           
     def step(self, action):
         """
         step function to track costs
@@ -248,7 +254,13 @@ class MicrogridState:
             self.battery.max_discharge,
             (current_soc - self.SOC_MIN) * self.battery.max_capacity
         )
-        control_dict = {}
+        control_dict = {
+            'grid_import': 30,
+            'grid_export': 0,
+            'battery_charge': 0,
+            'battery_discharge': 0,
+            'pv_consumed': 0
+        }
         action_type = ''
         
         if action == 0:  # Charge battery from the grid
@@ -311,14 +323,11 @@ class MicrogridState:
         # Remove the underscore from the method definition
         
     def calculate_reward(self, control_dict):
-        """
-        Calculate reward based on proximity to theoretical minimum cost.
-        """
         # Get current tariff rates
         tariff = self.get_current_tariff()
 
         # Calculate grid interactions
-        grid_import = control_dict.get('grid_import', 0)
+        grid_import = 30
         grid_export = control_dict.get('grid_export', 0)
 
         # Calculate costs and revenues
@@ -326,113 +335,48 @@ class MicrogridState:
         grid_revenue = grid_export * tariff['injection']
         actual_cost = grid_cost - grid_revenue
 
-        # Calculate theoretical minimum cost for current timestep
-        current_pv = self.state_space['pv_power']
-        current_load = self.state_space['load_demand']
-        theoretical_min = self.min_cost([current_pv], [current_load])  # Call min_cost as a method
-
-        # Calculate proximity to theoretical minimum
-        cost_difference = actual_cost - theoretical_min
-
-        # Reward increases as cost gets closer to theoretical minimum
-        if actual_cost == theoretical_min:
-            cost_reward = 100  # Maximum reward when cost is at or below theoretical minimum
-        else:
-            cost_reward = 100 * (1 - cost_difference / theoretical_min)  # Linearly decrease reward as cost increases
-
-        # Strategic battery management rewards
-        strategic_reward = 0
+        # Calculate the penalty for charging/discharging over SOC limits
         current_soc = self.state_space['battery_soc']
-        hour = self.state_space['time_hour']
+        penalty = 0
+        if current_soc < self.SOC_MIN or current_soc > self.SOC_MAX:
+            penalty = -self.MAX_PENALTY  # Apply maximum penalty if SOC is out of bounds
 
-        # Peak hours check (7-11 and 17-21)
-        is_peak = (7 <= hour < 11) or (17 <= hour < 21)
+        # Calculate the reward
+        reward = -actual_cost + penalty
 
-        # Modified peak/off-peak rewards
-        if is_peak:
-            if control_dict['battery_discharge'] > 0:
-                strategic_reward += 15  # Peak discharge reward
-            elif control_dict['battery_charge'] > 0:
-                strategic_reward -= 15  # Penalty for peak charging
-        else:
-            if control_dict['battery_charge'] > 0 and current_soc < self.SOC_OPTIMAL_MAX:
-                strategic_reward += 15  # Off-peak charging reward
-            elif control_dict['battery_discharge'] > 0:
-                strategic_reward -= 10  # Penalty for off-peak discharge
-
-        # Battery health management with smoother transitions
-        soc_reward = 0
-        if self.SOC_OPTIMAL_MIN <= current_soc <= self.SOC_OPTIMAL_MAX:
-            soc_reward += 15
-        else:
-            # Gradual penalty based on distance from optimal range
-            distance_from_optimal = min(
-                abs(current_soc - self.SOC_OPTIMAL_MIN),
-                abs(current_soc - self.SOC_OPTIMAL_MAX)
-            )
-            soc_reward -= 15 * (distance_from_optimal / 0.1)  # Gradual penalty
-
-        # Combine rewards with adjusted weights
-        total_reward = (
-            cost_reward * 1.2 +      # Increased emphasis on cost
-            strategic_reward +        # Keep strategic rewards as is
-            soc_reward * 0.8         # Slightly reduced SOC influence
-        )
-
-        # Smooth clipping of rewards
-        total_reward = np.clip(total_reward, -100, 100)
-
-        return total_reward, actual_cost
-                         
+        return reward, actual_cost
         
     def min_cost(self, pv_generation, load_demand):
         """
-        Calculate the theoretical minimum cost considering optimal battery usage:
-        - Buy (charge) during off-peak hours
-        - Sell (discharge) during peak hours
-        
-        Args:
-            pv_generation: List of PV generation values for each hour
-            load_demand: List of load demand values for each hour
-        
-        Returns:
-            float: Theoretical minimum cost
+        Calculate the theoretical minimum cost with no PV generation
         """
-        total_cost = 0
-        
-        # Battery parameters
-        max_discharge_per_peak = min(
-            self.battery.max_discharge,  # Max discharge rate
-            self.battery.max_capacity * (self.SOC_MAX - self.SOC_MIN) / 2  # Available capacity split between two peak periods
-        )
-        
-        for hour in range(24):
-            # Determine if current hour is peak
-            is_peak = (7 <= hour < 11) or (17 <= hour < 21)
-            
-            if is_peak:
-                # During peak hours:
-                # 1. Pay for load at peak rate
-                load_cost = load_demand[hour] * 0.17
-                # 2. Get revenue from battery discharge
-                battery_revenue = max_discharge_per_peak * 0.10
-                total_cost += load_cost - battery_revenue
-            else:
-                # During off-peak hours:
-                # 1. Pay for load at off-peak rate
-                load_cost = load_demand[hour] * 0.13
-                # 2. Pay for battery charging
-                if hour < 7:  # Morning charging for first peak
-                    battery_charge_cost = max_discharge_per_peak * 0.13
-                    total_cost += load_cost + battery_charge_cost
-                elif hour < 17:  # Afternoon charging for second peak
-                    battery_charge_cost = max_discharge_per_peak * 0.13
-                    total_cost += load_cost + battery_charge_cost
-                else:  # Night hours
-                    total_cost += load_cost
-        
-        return total_cost
+        pv_generation = np.array(pv_generation)
+        load_demand = np.array(load_demand)
 
+        absolute_min_cost = 0
+
+        # Check if we're calculating for a single timestep or full day
+        if len(load_demand) == 1:
+            # Single timestep calculation
+            hour = self.state_space['time_hour']
+            is_peak = (7 <= hour < 11) or (17 <= hour < 21)
+            rate = 0.17 if is_peak else 0.13
+            injection_rate = 0.10 if is_peak else 0.07  # Peak or off-peak rate
+            
+            net_load = load_demand[0]
+            
+            if net_load > 0:  # Buy from grid
+                absolute_min_cost += net_load * rate
+            else:  # Sell excess to grid
+                absolute_min_cost += net_load * injection_rate  # Negative cost = revenue
+        else:
+            # Full day calculation
+            for hour in range(24):
+                is_peak = (7 <= hour < 11) or (17 <= hour < 21)
+                rate = 0.17 if is_peak else 0.13  # Peak or off-peak rate
+                absolute_min_cost += load_demand[hour] * rate
+
+        return absolute_min_cost
 
 class QLearningAgent:
     def __init__(self, n_states, n_actions, learning_rate, discount_factor, epsilon):
@@ -459,31 +403,34 @@ class QLearningAgent:
         state format: (battery_state, pv_state, load_state, time_state)
         """
         try:
-            battery, pv, load, time = state
-            
+            battery, pv, load, time = state    
             # Verify state components are within bounds
-            if (0 <= battery < self.battery_states and 
-                0 <= pv < self.pv_states and 
-                0 <= load < self.load_states and 
-                0 <= time < self.time_states):
-                
-                # Calculate unique index using positional value method
-                index = (battery * (self.pv_states * self.load_states * self.time_states) + 
-                        pv * (self.load_states * self.time_states) + 
-                        load * self.time_states + 
-                        time)
-                
-                return index
-            else:
-                print(f"State out of bounds: battery={battery}, pv={pv}, load={load}, time={time}")
-                # Return a safe default state index
+            if not (0 <= battery < self.battery_states):
+                print(f"Battery state {battery} out of bounds [0, {self.battery_states})")
+                return 0
+            if not (0 <= pv < self.pv_states):
+                print(f"PV state {pv} out of bounds [0, {self.pv_states})")
+                return 0
+            if not (0 <= load < self.load_states):
+                print(f"Load state {load} out of bounds [0, {self.load_states})")
+                return 0
+            if not (0 <= time < self.time_states):
+                print(f"Time state {time} out of bounds [0, {self.time_states})")
                 return 0
                 
+            # Calculate unique index using positional value method
+            index = (battery * (self.pv_states * self.load_states * self.time_states) + 
+                    pv * (self.load_states * self.time_states) + 
+                    load * self.time_states + 
+                    time)
+            
+            return index
+        
         except Exception as e:
             print(f"Error in get_state_index: {e}")
             print(f"State received: {state}")
             # Return a safe default state index
-            return 0
+            return 0      
 
     def choose_action(self, state):
         try:
@@ -1037,7 +984,7 @@ def main():
     
     # Initialize agent with correct state space size
     agent = QLearningAgent(
-        n_states=5*3*3*4,  # battery_states * pv_states * load_states * time_states
+        n_states=20,  # battery_states * pv_states * load_states * time_states
         n_actions=2,       # charge or discharge
         learning_rate=0.2,
         discount_factor=0.99,
