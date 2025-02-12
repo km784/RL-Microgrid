@@ -27,7 +27,7 @@ battery = BatteryModule(
 )
 # Create renewable (PV) module with specific generation profile
 renewable = RenewableModule(
-    time_series=50*np.random.rand(100)  # Replace with your PV generation data
+    time_series=[0]*24  # Replace with your PV generation data
 )
 # Create load module with specific consumption profile
 load = LoadModule(
@@ -394,176 +394,186 @@ class MicrogridState:
         
     def min_cost(self, pv_generation, load_demand):
         """
-        Calculate the theoretical minimum cost for a 24-hour period given perfect foresight
-        and optimal battery operation.
-        
-        Args:
-            pv_generation (list/array): PV generation profile for 24 hours in kW
-            load_demand (list/array): Load demand profile for 24 hours in kW
-                
-        Returns:
-            float: Theoretical minimum cost in pounds
+        Calculate the theoretical minimum cost with no PV generation
         """
-        # Convert inputs to numpy arrays if they aren't already
         pv_generation = np.array(pv_generation)
         load_demand = np.array(load_demand)
         
-        # Handle single value inputs by repeating them 24 times
-        if np.isscalar(pv_generation) or len(pv_generation) == 1:
-            pv_generation = np.full(24, pv_generation if np.isscalar(pv_generation) else pv_generation[0])
-        if np.isscalar(load_demand) or len(load_demand) == 1:
-            load_demand = np.full(24, load_demand if np.isscalar(load_demand) else load_demand[0])
+        # With no PV generation, the theoretical minimum is simply
+        # satisfying all load at the cheapest possible rate
+        absolute_min_cost = 0
         
-        # Ensure inputs are lists or arrays of length 24
-        if not isinstance(pv_generation, (list, np.ndarray)) or not isinstance(load_demand, (list, np.ndarray)):
-            raise ValueError("pv_generation and load_demand must be lists or arrays")
-        
-        if len(pv_generation) != 24 or len(load_demand) != 24:
-            raise ValueError("pv_generation and load_demand must contain 24 values (one for each hour)")
-        
-        total_cost = 0
-        total_revenue = 0
-        
-        # Define battery parameters
-        battery_capacity = 120  # kWh
-        max_charge_rate = 50    # kW
-        max_discharge_rate = 50 # kW
-        initial_soc = 0.5 * battery_capacity  # Start at 50% SOC
-        current_soc = initial_soc
-        
-        # Create arrays for peak and off-peak periods
-        hours = range(24)
-        peak_periods = [(7, 11), (17, 21)]
-        
-        # Create a list of hourly periods with their associated tariffs
-        period_tariffs = []
-        for hour in hours:
-            is_peak = any(start <= hour < end for start, end in peak_periods)
-            if is_peak:
-                tariff = {
-                    'hour': hour,
-                    'consumption': 0.17,  # Peak consumption rate (£/kWh)
-                    'injection': 0.10    # Peak injection rate (£/kWh)
-                }
-            else:
-                tariff = {
-                    'hour': hour,
-                    'consumption': 0.13,  # Off-peak consumption rate (£/kWh)
-                    'injection': 0.07    # Off-peak injection rate (£/kWh)
-                }
-            period_tariffs.append(tariff)
-        
-        # Sort periods by price differential
-        period_tariffs.sort(key=lambda x: x['hour'])
-        
-        # Calculate optimal battery operation for each hour
-        for period in period_tariffs:
-            hour = period['hour']
-            net_load = load_demand[hour] - pv_generation[hour]
+        for hour in range(24):
+            # Check if it's peak or off-peak
+            is_peak = (7 <= hour < 11) or (17 <= hour < 21)
+            rate = 0.17 if is_peak else 0.13  # Peak or off-peak rate
             
-            if any(start <= hour < end for start, end in peak_periods):
-                # During high-price periods, discharge the battery
-                max_discharge = min(max_discharge_rate, current_soc)  # Discharge up to max_discharge_rate or current SOC
-                discharge = min(max_discharge, net_load)  # Discharge only what is needed
-                current_soc -= discharge
-                
-                # Calculate revenue from discharging
-                revenue = discharge * period['injection']
-                total_revenue += revenue
-                
-            else:
-                # During low-price periods, charge the battery
-                max_charge = min(max_charge_rate, battery_capacity - current_soc)  # Charge up to max_charge_rate or remaining capacity
-                charge = min(max_charge, -net_load)  # Charge only if there is excess generation
-                current_soc += charge
-                
-                # Calculate cost of charging
-                cost = charge * period['consumption']
-                total_cost += cost
-                
-            absolute_min_cost = total_cost - total_revenue
-                    
+            # Cost of satisfying load for this hour
+            absolute_min_cost += load_demand[hour] * rate
+                        
         return absolute_min_cost
 
-class QLearningAgent:       # creates Q-table and sets learning and exploration parameters
+class QLearningAgent:
     def __init__(self, n_states, n_actions, learning_rate, discount_factor, epsilon):
-        self.q_table = np.zeros((n_states, n_actions))
+        # Calculate the actual state space size based on the discrete state components
+        self.battery_states = 5  # 0 to 4
+        self.pv_states = 3      # 0 to 2
+        self.load_states = 3    # 0 to 2
+        self.time_states = 4    # 0 to 3
+        
+        # Calculate total number of states
+        self.n_states = self.battery_states * self.pv_states * self.load_states * self.time_states
+        
+        # Initialize Q-table with correct dimensions
+        self.q_table = np.zeros((self.n_states, n_actions))
         self.learning_rate = learning_rate
         self.discount_factor = discount_factor
         self.epsilon = epsilon
         self.epsilon_decay = 0.995
         self.epsilon_min = 0.01
-        
+
     def get_state_index(self, state):
-        battery, pv, load, time = state  # Components
-        return battery * (3 * 3 * 4) + pv * (3 * 4) + load * 4 + time
-    
-    def choose_action(self, state):                          # Implements epsilon-greedy strategy 
-        if np.random.random() < self.epsilon:
-            return np.random.randint(0, self.q_table.shape[1])     
-        state_idx = self.get_state_index(state)
-        return int(np.argmax(self.q_table[state_idx, :]))
-    
-    def learn(self, state, action, reward, next_state):                # Updates Q-values using on Bellman equation
-        state_idx = self.get_state_index(state)                        # future reward and immediate reward
-        next_state_idx = self.get_state_index(next_state)
-        
-        old_q = self.q_table[state_idx, action]
-        next_max_q = np.max(self.q_table[next_state_idx, :])
-        new_q = (1 - self.learning_rate) * old_q + \
-                self.learning_rate * (reward + self.discount_factor * next_max_q)      # Q-learning fomrmula
-        
-        self.q_table[state_idx, action] = new_q
-        
+        """
+        Convert state tuple to a single index for Q-table lookup
+        state format: (battery_state, pv_state, load_state, time_state)
+        """
+        try:
+            battery, pv, load, time = state
+            
+            # Verify state components are within bounds
+            if (0 <= battery < self.battery_states and 
+                0 <= pv < self.pv_states and 
+                0 <= load < self.load_states and 
+                0 <= time < self.time_states):
+                
+                # Calculate unique index using positional value method
+                index = (battery * (self.pv_states * self.load_states * self.time_states) + 
+                        pv * (self.load_states * self.time_states) + 
+                        load * self.time_states + 
+                        time)
+                
+                return index
+            else:
+                print(f"State out of bounds: battery={battery}, pv={pv}, load={load}, time={time}")
+                # Return a safe default state index
+                return 0
+                
+        except Exception as e:
+            print(f"Error in get_state_index: {e}")
+            print(f"State received: {state}")
+            # Return a safe default state index
+            return 0
+
+    def choose_action(self, state):
+        try:
+            if np.random.random() < self.epsilon:
+                return np.random.randint(0, self.q_table.shape[1])
+            
+            state_idx = self.get_state_index(state)
+            return int(np.argmax(self.q_table[state_idx, :]))
+            
+        except Exception as e:
+            print(f"Error in choose_action: {e}")
+            # Return a safe default action
+            return 0
+
+    def learn(self, state, action, reward, next_state):
+        try:
+            state_idx = self.get_state_index(state)
+            next_state_idx = self.get_state_index(next_state)
+            
+            old_q = self.q_table[state_idx, action]
+            next_max_q = np.max(self.q_table[next_state_idx, :])
+            
+            new_q = (1 - self.learning_rate) * old_q + \
+                    self.learning_rate * (reward + self.discount_factor * next_max_q)
+            
+            self.q_table[state_idx, action] = new_q
+            
+        except Exception as e:
+            print(f"Error in learn: {e}")
+
     def decay_epsilon(self):
         self.epsilon = max(self.epsilon_min, self.epsilon * self.epsilon_decay)
-        # Exploration vs exploitation, agent starts to exploit when gains more knowledge
+        
 def train_microgrid(env, agent, n_episodes, max_steps):
     episode_rewards = []
-    episode_costs = []  # Added to track costs
+    episode_costs = []
     env.battery_data = []
+    
     for episode in range(n_episodes):
-        
         env.current_episode = episode
         env.current_step = 0
         
-        # Randomize initial SOC between SOC_MIN and SOC_MAX for each episode
-        env.state_space['battery_soc'] = np.random.uniform(env.SOC_MIN, env.SOC_MAX)
-                
+        # Reset environment state for new episode
+        env.state_space = {
+            'battery_soc': np.random.uniform(env.SOC_MIN, env.SOC_MAX),
+            'pv_power': 0.0,
+            'load_demand': 30.0,
+            'time_hour': 0,
+            'net_load': 30.0,
+            'battery_health': 100.0
+        }
+        
         total_reward = 0
         total_cost = 0
-        state = env.update_state()
+        state = env.update_state()  # Get initial state
         episode_data = []
+        
         for step in range(max_steps):
             step_data = {
                 'Episode': episode,
+                'Step': step,
                 'Time_Hour': env.state_space['time_hour'],
                 'Battery_SOC': env.state_space['battery_soc'],
                 'PV_Power': env.state_space['pv_power'],
-                'Load_Demand': env.state_space['load_demand']
+                'Load_Demand': env.state_space['load_demand'],
+                'Net_Load': env.state_space['net_load']
             }
+            
+            # Get action from agent
             action = agent.choose_action(state)
+            
+            # Take step in environment
             next_state, reward, done = env.step(action)
             
-            # Store the cost from the environment
+            # Store step data
+            step_data.update({
+                'Action': action,
+                'Reward': reward,
+                'Battery_Degradation': env.last_degradation,
+                'Remaining_Capacity': env.state_space['battery_health']
+            })
+            episode_data.append(step_data)
+            
+            # Update totals
             total_cost += env.last_cost
             total_reward += reward
-            step_data['Action'] = action
-            step_data['Reward'] = reward
-            episode_data.append(step_data)
+            
+            # Agent learning
             agent.learn(state, action, reward, next_state)
+            
+            # Update state
             state = next_state
+            
             if done:
                 break
-        # Convert episode data to DataFrame and append to battery_data list
+        
+        # Convert episode data to DataFrame and append to battery_data
         episode_df = pd.DataFrame(episode_data)
         env.battery_data.append(episode_df)
+        
+        # Update agent exploration rate
         agent.decay_epsilon()
+        
+        # Store episode metrics
         episode_rewards.append(total_reward)
         episode_costs.append(total_cost)
-        if episode % 100 == 0:
-            avg_reward = np.mean(episode_rewards[-100:] if len(episode_rewards) >= 100 else episode_rewards)
-   
+        
+        # Print progress
+        if episode % 10 == 0:
+            print(f"Episode {episode}/{n_episodes} completed. Total reward: {total_reward:.2f}")
+    
     return episode_rewards, episode_costs, env.battery_data
 
 def plot_training_progress(episode_rewards, save_path=None):
@@ -969,7 +979,7 @@ def plot_convergence_to_min_cost(episode_rewards, episode_costs, theoretical_min
     # Calculate convergence metrics
     if len(episode_costs) >= window_size:
         final_avg_cost = np.mean(episode_costs[-window_size:])
-        cost_gap = ((final_avg_cost - absolute_min_cost) / abs(absolute_min_cost)) * 100
+        cost_gap = ((final_avg_cost - theoretical_min_cost) / abs(theoretical_min_cost)) * 100
         
         stats_text = (
             f'Convergence Metrics:\n'
@@ -1003,9 +1013,11 @@ def plot_convergence_to_min_cost(episode_rewards, episode_costs, theoretical_min
 def main():
     # Initialize environment and agent
     microgrid_env = MicrogridState()
+    
+    # Initialize agent with correct state space size
     agent = QLearningAgent(
-        n_states=5*3*3*4,
-        n_actions=2,
+        n_states=5*3*3*4,  # battery_states * pv_states * load_states * time_states
+        n_actions=2,       # charge or discharge
         learning_rate=0.2,
         discount_factor=0.99,
         epsilon=1.0
@@ -1013,17 +1025,17 @@ def main():
     
     # Training parameters
     n_episodes = 100
-    max_steps_per_episode = len(load.time_series)
+    max_steps_per_episode = 24  # One day
     
     # Define load demand and PV generation
     load_demand = [30] * 24
-    pv_generation = 50*np.random.rand(24)
+    pv_generation = [0] * 24
     
     # Calculate theoretical minimum cost
     theoretical_min_cost = microgrid_env.min_cost(pv_generation, load_demand)
     
-    # Train the agent
     try:
+        print("Starting training...")
         episode_rewards, episode_costs, battery_data = train_microgrid(
             env=microgrid_env,
             agent=agent,
@@ -1031,43 +1043,44 @@ def main():
             max_steps=max_steps_per_episode
         )
         
-        # Save the Q-table
-        np.save('q_table.npy', agent.q_table)
+        print("Training completed. Creating plots...")
         
-        # Create plots
-        training_fig = plot_training_progress(episode_rewards, 
-                                           save_path=os.path.join(log_dir, 'training_progress.png'))
+        # Create and save plots
+        plot_training_progress(episode_rewards, 
+                             save_path=os.path.join(log_dir, 'training_progress.png'))
         
-        soc_fig = plot_soc_across_episodes(
+        plot_soc_across_episodes(
             microgrid_env,
             battery_data,
             save_path=os.path.join(log_dir, 'soc_across_episodes.png')
         )
         
-        tariff_battery_fig = plot_tariff_battery_relationship(
+        plot_tariff_battery_relationship(
             microgrid_env,
             battery_data,
             save_path=os.path.join(log_dir, 'tariff_battery_relationship.png')
         )
         
-        actions_soc_fig = plot_battery_actions_soc_comparison(
+        plot_battery_actions_soc_comparison(
             microgrid_env,
             battery_data,
             save_path=os.path.join(log_dir, 'battery_actions_soc.png')
         )
         
-        # Pass the theoretical_min_cost to the convergence plot
-        convergence_fig = plot_convergence_to_min_cost(
+        plot_convergence_to_min_cost(
             episode_rewards,
             episode_costs,
-            theoretical_min_cost,  # Now properly defined and passed
+            theoretical_min_cost,
             save_path=os.path.join(log_dir, 'convergence.png')
         )
         
+        print("All plots saved successfully.")
         plt.show()
-    
-    except Exception as e:
-        print(f"Error: {e}")
         
+    except Exception as e:
+        print(f"Error in main: {str(e)}")
+        import traceback
+        traceback.print_exc()
+
 if __name__ == "__main__":
     main()
