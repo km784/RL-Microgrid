@@ -235,6 +235,7 @@ class BatteryDegradation:
             'estimated_remaining_cycles': max(0, self.cycle_life_reference - self.cycle_count)
         }
     
+
 class MicrogridState:
     def __init__(self):
              
@@ -245,6 +246,7 @@ class MicrogridState:
         
         self._initialize_csv()
         self.battery_data = []
+        
         
     def _initialize_csv(self):                     #initializing csv files
         try:
@@ -616,7 +618,7 @@ class MicrogridState:
 
     def calculate_reward(self, control_dict):
         """
-        Improved reward calculation with smooth convergence to theoretical minimum.
+        Modified reward calculation to better incentivize peak-time discharging
         """
         # Get current tariff rates
         tariff = self.get_current_tariff()
@@ -635,16 +637,14 @@ class MicrogridState:
         current_load = self.state_space['load_demand']
         theoretical_min = min_cost([current_pv], [current_load])
         
-        # Calculate proximity to theoretical minimum
+        # Calculate cost-based reward with increased weight for revenue
         cost_difference = actual_cost - theoretical_min
-        
-       # Reward increases as cost gets closer to theoretical minimum
-        if actual_cost == theoretical_min:
-            cost_reward = 100  # Maximum reward when cost is at or below theoretical minimum
+        if grid_revenue > 0:  # Incentivize grid export
+            cost_reward = 150 * (grid_revenue / (tariff['injection'] * self.battery.max_discharge))
         else:
-            cost_reward = 100 * (1 - cost_difference / theoretical_min)  # Linearly decrease reward as cost increases
+            cost_reward = 100 * (1 - cost_difference / theoretical_min)
         
-        # Strategic battery management rewards
+        # Strategic battery management rewards with higher peak discharge incentive
         strategic_reward = 0
         current_soc = self.state_space['battery_soc']
         hour = self.state_space['time_hour']
@@ -652,42 +652,49 @@ class MicrogridState:
         # Peak hours check (7-11 and 17-21)
         is_peak = (7 <= hour < 11) or (17 <= hour < 21)
         
-        # Modified peak/off-peak rewards
         if is_peak:
-            if control_dict['battery_discharge'] > 0:
-                strategic_reward += 15  # Slightly reduced peak discharge reward
-            elif control_dict['battery_charge'] > 0:
-                strategic_reward -= 15  # Increased penalty for peak charging
+            if 'battery_discharge' in control_dict and control_dict['battery_discharge'] > 0:
+                # Increased reward for peak discharge
+                strategic_reward += 40 * (control_dict['battery_discharge'] / self.battery.max_discharge)
+            elif 'battery_charge' in control_dict and control_dict['battery_charge'] > 0:
+                strategic_reward -= 25  # Increased penalty for peak charging
         else:
-            if control_dict['battery_charge'] > 0 and current_soc < self.SOC_OPTIMAL_MAX:
-                strategic_reward += 15  # Increased off-peak charging reward
-            elif control_dict['battery_discharge'] > 0:
-                strategic_reward -= 10  # Increased penalty for off-peak discharge
+            if 'battery_charge' in control_dict and control_dict['battery_charge'] > 0 and current_soc < self.SOC_OPTIMAL_MAX:
+                strategic_reward += 20  # Increased off-peak charging reward
+            elif 'battery_discharge' in control_dict and control_dict['battery_discharge'] > 0:
+                strategic_reward -= 15  # Increased penalty for off-peak discharge
         
-        # Battery health management with smoother transitions
+        # Modified SOC reward with reduced penalties for peak-time discharge
         soc_reward = 0
-        if self.SOC_OPTIMAL_MIN <= current_soc <= self.SOC_OPTIMAL_MAX:
-            soc_reward += 15
+        if is_peak:
+            # Reduced SOC penalties during peak hours to encourage discharge
+            if self.SOC_MIN <= current_soc <= self.SOC_MAX:
+                soc_reward += 10
+            else:
+                soc_reward -= 20
         else:
-            # Gradual penalty based on distance from optimal range
-            distance_from_optimal = min(
-                abs(current_soc - self.SOC_OPTIMAL_MIN),
-                abs(current_soc - self.SOC_OPTIMAL_MAX)
-            )
-            soc_reward -= 15 * (distance_from_optimal / 0.1)  # Gradual penalty
+            # Normal SOC management during off-peak hours
+            if self.SOC_OPTIMAL_MIN <= current_soc <= self.SOC_OPTIMAL_MAX:
+                soc_reward += 15
+            else:
+                distance_from_optimal = min(
+                    abs(current_soc - self.SOC_OPTIMAL_MIN),
+                    abs(current_soc - self.SOC_OPTIMAL_MAX)
+                )
+                soc_reward -= 15 * (distance_from_optimal / 0.1)
         
         # Combine rewards with adjusted weights
         total_reward = (
-            cost_reward * 1.2 +      # Increased emphasis on cost
-            strategic_reward +        # Keep strategic rewards as is
-            soc_reward * 0.8         # Slightly reduced SOC influence
+            cost_reward * 1.5 +      # Increased weight for cost/revenue
+            strategic_reward * 1.2 +  # Increased weight for strategic actions
+            soc_reward * 0.6         # Reduced weight for SOC management
         )
         
         # Smooth clipping of rewards
         total_reward = np.clip(total_reward, -100, 100)
         
         return total_reward, actual_cost
-        
+            
     def calculate_theoretical_min_cost(self, pv_generation, load_demand):
         """
         Calculate theoretical minimum cost with more realistic constraints
@@ -755,11 +762,22 @@ class QLearningAgent:
         
         # Add experience tracking
         self.experience_count = np.zeros((n_states, n_actions))
+       
         
     def get_state_index(self, state):
-        battery, pv, load, time = state  # Components
-        return battery * (3 * 3 * 4) + pv * (3 * 4) + load * 4 + time
-    
+        battery, pv, load, time = state
+        is_peak_period = (7 <= time < 11) or (17 <= time < 21)
+        
+        # Convert time periods into more meaningful states
+        if is_peak_period:
+            time_state = 0  # Peak period
+        elif time < 7 or time >= 21:
+            time_state = 1  # Night (off-peak)
+        else:
+            time_state = 2  # Day (off-peak)
+            
+        return (battery * (3 * 3 * 3)) + (pv * (3 * 3)) + (load * 3) + time_state
+        
     def choose_action(self, state):
         state_idx = self.get_state_index(state)
         
@@ -771,8 +789,6 @@ class QLearningAgent:
                 least_visited = np.where(action_counts == action_counts.min())[0]
                 return np.random.choice(least_visited)
             return np.random.randint(0, self.q_table.shape[1])
-        
-        return int(np.argmax(self.q_table[state_idx, :]))
     
     def learn(self, state, action, reward, next_state):
         state_idx = self.get_state_index(state)
@@ -798,23 +814,23 @@ class QLearningAgent:
 
 def train_microgrid(env, agent, n_episodes, max_steps):
     episode_rewards = []
-    episode_costs = []  # Added to track costs
+    episode_costs = []
     env.battery_data = []
-
+    
     for episode in range(n_episodes):
         logger.info(f"Starting episode {episode}")
         
         env.current_episode = episode
         env.current_step = 0
         
-        # Randomize initial SOC between SOC_MIN and SOC_MAX for each episode
+        # Randomize initial SOC between SOC_MIN and SOC_MAX
         env.state_space['battery_soc'] = np.random.uniform(env.SOC_MIN, env.SOC_MAX)
-                
+        
         total_reward = 0
         total_cost = 0
         state = env.update_state()
         episode_data = []
-
+        
         for step in range(max_steps):
             step_data = {
                 'Episode': episode,
@@ -823,23 +839,23 @@ def train_microgrid(env, agent, n_episodes, max_steps):
                 'PV_Power': env.state_space['pv_power'],
                 'Load_Demand': env.state_space['load_demand']
             }
-
-            action = agent.choose_action(state)
-            next_state, reward, done = env.step(action)
             
-            # Store the cost from the environment
+            # Choose action using the modified choose_action method
+            action = agent.choose_action(state)
+            
+            next_state, reward, done = env.step(action)
             total_cost += env.last_cost
             total_reward += reward
-
+            
             step_data['Action'] = action
             step_data['Reward'] = reward
             episode_data.append(step_data)
-
+            
             agent.learn(state, action, reward, next_state)
             state = next_state
-
-            env.log_state_to_csv()  # Log state after each step
-
+            
+            env.log_state_to_csv()
+            
             if done:
                 break
 
@@ -979,7 +995,7 @@ def plot_soc_across_episodes(self, battery_data, save_path=None):
         logger.error(f"Error in plot_soc_across_episodes: {str(e)}")
         return None
     
-def plot_tariff_battery_relationship(env, battery_data, episodes_to_compare=[10, 99], save_path=None):
+def plot_tariff_battery_relationship(env, battery_data, episodes_to_compare=[10, 2999], save_path=None):
     """
     Plot injection tariff rates and battery SOC against time, comparing two episodes
     
@@ -1310,7 +1326,7 @@ def main():
     agent = QLearningAgent(
         n_states=5*3*3*4,
         n_actions=2,
-        learning_rate=0.1,
+        learning_rate=0.2,
         discount_factor=0.99,
         epsilon=1.0
     )
