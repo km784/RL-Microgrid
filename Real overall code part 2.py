@@ -20,7 +20,7 @@ if not os.path.exists(log_dir):
 battery = BatteryModule(
     min_capacity=0,
     max_capacity=120,  # Maximum battery capacity in kWh
-    max_charge=50,     # Maximum charging rate in kW
+    max_charge=15,     # Maximum charging rate in kW
     max_discharge=30,  # Maximum discharging rate in kW                                                                                                      
     efficiency=1.0,    # Battery efficiency
     init_soc=0.5       # Initial state of charge (50%)
@@ -195,15 +195,12 @@ class MicrogridState:
         else:
             battery_state = 4
        
-        
         # PV state is always 0 since we only have one state
         pv_state = 0
-
         
         # Load state is always 0 since we only have one state
         load_state = 0
        
-        
         # Time state discretization
         if self.state_space['time_hour'] < 6:
             time_state = 0
@@ -235,7 +232,7 @@ class MicrogridState:
         
         self.current_step += 1
         
-        done = self.state_space['time_hour'] >= 23
+        done = self.state_space['time_hour'] > 23
         
         return next_state, reward, done
     
@@ -323,49 +320,21 @@ class MicrogridState:
         # Remove the underscore from the method definition
         
     def calculate_reward(self, control_dict):
-        # Get current tariff rates
         tariff = self.get_current_tariff()
-        hour = self.state_space['time_hour']
         
-        # Base cost calculation - always buying 30 kWh
-        base_cost = 30 * tariff['consumption']  # 30 kWh * current rate
+        # Mandatory base load - always need to import 30 kWh
+        base_cost = 30 * tariff['consumption']
         
-        # Initialize penalty
-        penalty = 0
+        # Battery operations
+        battery_charge_cost = control_dict['battery_charge'] * tariff['consumption']
+        battery_export_revenue = control_dict['battery_discharge'] * tariff['injection']
         
-        # Check if we're in peak or off-peak hours
-        is_peak_hour = (7 <= hour < 11) or (17 <= hour < 21)
-        print(f"""
-        Hour: {hour}
-        Is Peak: {is_peak_hour}
-        Tariff Rate: {tariff['consumption']}
-        Base Cost: {base_cost}
-        Battery Charge Amount: {control_dict['battery_charge']}
-        Battery Discharge Amount: {control_dict['battery_discharge']}
-        """)
-        # Calculate penalties and adjust reward (not cost) based on battery actions
-        if control_dict['battery_charge'] > 0:  # Battery charging
-            if is_peak_hour:
-                # Penalty for charging during peak hours
-                penalty -= 10
-                # Add charging cost to base cost
-                base_cost += control_dict['battery_charge'] * tariff['consumption']
-                print(f"Added charging cost: {control_dict['battery_charge'] * tariff['consumption']}")
-                
-        if control_dict['battery_discharge'] > 0:  # Battery discharging
-            if not is_peak_hour:
-                # Penalty for discharging during off-peak hours
-                penalty -= 10
-            else:
-                # Add reward (not cost reduction) for strategic discharge
-                penalty += control_dict['battery_discharge'] * tariff['injection']
+        # Total cost: base load + battery charging - export revenue
+        total_cost = base_cost + battery_charge_cost - battery_export_revenue
         
-        # Reward = negative cost plus penalties/bonuses
-        reward = -base_cost + penalty
-        print(f"Added discharge bonus to penalty: {control_dict['battery_discharge'] * tariff['injection']}")
-    
-        print(f"Final base_cost: {base_cost}, penalty: {penalty}")
-        return reward, base_cost
+        reward = -total cost 
+        
+        return reward, total_cost
         
     def min_cost(self, pv_generation, load_demand):
         """
@@ -655,13 +624,8 @@ def plot_soc_across_episodes(self, battery_data, save_path=None):
     
 def plot_tariff_battery_relationship(env, battery_data, episodes_to_compare=[10, 99], save_path=None):
     """
-    Plot injection tariff rates and battery SOC against time, comparing two episodes
-    
-    Args:
-        env: MicrogridState environment instance
-        battery_data: List of DataFrames containing episode data
-        episodes_to_compare: List of episode numbers to compare
-        save_path: Optional path to save the plot
+    Plot injection tariff rates and battery SOC against time, comparing two episodes.
+    Fixed version that prevents duplicate plotting of battery SOC.
     """
     plt.figure(figsize=(15, 10))
     
@@ -684,31 +648,35 @@ def plot_tariff_battery_relationship(env, battery_data, episodes_to_compare=[10,
     # Process each episode
     for idx, episode_num in enumerate(episodes_to_compare):
         ax = ax1 if idx == 0 else ax2
-        twin_ax = ax.twinx()
+        twin_ax = ax.twinx()  # Create secondary y-axis
         
         # Get episode data
         episode_data = all_data[all_data['Episode'] == episode_num]
         
-        # Plot injection tariff on primary y-axis
-        line1 = ax.plot(hours, injection_tariffs, 'g-', label='Injection Tariff', linewidth=2.5)
+        # Plot injection tariff on left y-axis (green)
+        tariff_line = ax.plot(hours, injection_tariffs, 
+                            'g-', 
+                            label='Injection Tariff', 
+                            linewidth=2.5)
+        ax.set_ylabel('Injection Tariff Rate (£/kWh)', color='g', fontsize=12)
+        ax.tick_params(axis='y', labelcolor='g')
         
-        # Plot battery SOC on secondary y-axis
-        line2 = twin_ax.plot(episode_data['Time_Hour'], 
-                           episode_data['Battery_SOC'] * 100, 
-                           'b-', 
-                           label='Battery SOC', 
-                           linewidth=2.5)
+        # Plot battery SOC only on right y-axis (blue)
+        soc_line = twin_ax.plot(episode_data['Time_Hour'], 
+                              episode_data['Battery_SOC'] * 100, 
+                              'b-', 
+                              label='Battery SOC', 
+                              linewidth=2.5)
+        twin_ax.set_ylabel('Battery State of Charge (%)', color='b', fontsize=12)
+        twin_ax.tick_params(axis='y', labelcolor='b')
         
         # Add shaded regions for peak hours
         peak_periods = [(7, 11), (17, 21)]
         for start, end in peak_periods:
-            ax.axvspan(start, end, color='yellow', alpha=0.2, label='Peak Hours' if start == 7 else "")
+            ax.axvspan(start, end, color='yellow', alpha=0.2, 
+                      label='Peak Hours' if start == 7 else "")
         
-        # Customize the plot
-        ax.set_xlabel('Time of Day (Hour)', fontsize=12)
-        ax.set_ylabel('Injection Tariff Rate (£/kWh)', fontsize=12, color='g')
-        twin_ax.set_ylabel('Battery State of Charge (%)', fontsize=12, color='b')
-        
+        # Set axis limits
         ax.set_xlim(0, 23)
         ax.set_ylim(0, 0.12)
         twin_ax.set_ylim(0, 100)
@@ -717,8 +685,8 @@ def plot_tariff_battery_relationship(env, battery_data, episodes_to_compare=[10,
         ax.grid(True, which='major', alpha=0.3)
         ax.grid(True, which='minor', alpha=0.1)
         
-        # Combine legends from both axes
-        lines = line1 + line2
+        # Combine legends
+        lines = tariff_line + soc_line
         labels = [l.get_label() for l in lines]
         ax.legend(lines, labels, loc='upper right')
         
@@ -748,6 +716,9 @@ def plot_tariff_battery_relationship(env, battery_data, episodes_to_compare=[10,
                          facecolor='white',
                          edgecolor='#CCCCCC',
                          alpha=0.9))
+        
+        if idx == 0:  # Only add xlabel to bottom subplot
+            ax.set_xlabel('Time of Day (Hour)', fontsize=12)
     
     # Add overall title
     fig.suptitle('Injection Tariff Rate and Battery SOC vs Time of Day: Learning Comparison', 
@@ -758,9 +729,9 @@ def plot_tariff_battery_relationship(env, battery_data, episodes_to_compare=[10,
     if save_path:
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
     
-    return plt.gcf()
+    return fig
 
-def plot_battery_actions_soc_comparison(env, battery_data, episodes_to_compare=[10, 99], save_path=None):
+def plot_battery_actions_soc_comparison(env, battery_data, episodes_to_compare=[10, 2999], save_path=None):
     """
     Create a visualization comparing agent behavior across different episodes
     to demonstrate learning progress
@@ -879,9 +850,9 @@ def plot_battery_actions_soc_comparison(env, battery_data, episodes_to_compare=[
     # Add learning progress summary
     summary_text = (
         f"Learning Progress:\n"
-        f"Optimal Range Time: {learning_metrics[10]['optimal_range_time']:.1f}% → {learning_metrics[99]['optimal_range_time']:.1f}%\n"
-        f"Strategic Peak Discharges: {learning_metrics[10]['peak_discharges']} → {learning_metrics[99]['peak_discharges']}\n"
-        f"Strategic Off-Peak Charges: {learning_metrics[10]['off_peak_charges']} → {learning_metrics[99]['off_peak_charges']}"
+        f"Optimal Range Time: {learning_metrics[10]['optimal_range_time']:.1f}% → {learning_metrics[2999]['optimal_range_time']:.1f}%\n"
+        f"Strategic Peak Discharges: {learning_metrics[10]['peak_discharges']} → {learning_metrics[2999]['peak_discharges']}\n"
+        f"Strategic Off-Peak Charges: {learning_metrics[10]['off_peak_charges']} → {learning_metrics[2999]['off_peak_charges']}"
     )
     
     plt.figtext(0.02, 0.02, summary_text,
@@ -993,13 +964,13 @@ def main():
     agent = QLearningAgent(
         n_states=20,  # battery_states * pv_states * load_states * time_states
         n_actions=2,       # charge or discharge
-        learning_rate=0.2,
+        learning_rate=0.1,
         discount_factor=0.99,
         epsilon=1.0
     )
     
     # Training parameters
-    n_episodes = 100
+    n_episodes = 4000
     max_steps_per_episode = 24  # One day
     
     # Define load demand and PV generation
