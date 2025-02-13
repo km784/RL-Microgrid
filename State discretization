@@ -1,0 +1,22 @@
+ def discretize_state(self):
+        # Battery state discretization
+        if self.state_space['battery_soc'] self.SOC_MIN < self.SOC_OPTIMAL_MIN:
+            battery_state = 0
+        elif self.state_space['battery_soc'] self.SOC_OPTIMAL_MIN < self.SOC_OPTIMAL_MAX:
+            battery_state = 1
+        elif self.state_space['battery_soc'] self.SOC_OPTIMAL_MAX < self.SOC_MAX:
+            battery_state = 2
+       
+        # PV state is always 0 since we only have one state
+        pv_state = 0
+        
+        # Load state is always 0 since we only have one state
+        load_state = 0
+       
+        # Time state discretization
+        if (7 <= self.state_space['time_hour'] < 11) or (17 <= self.state_space['time_hour'] < 21):
+           time_state = 1  # On-peak hours
+        else:
+            time_state = 0  # Off-peak hours
+            
+        return (battery_state, pv_state, load_state, time_state)
