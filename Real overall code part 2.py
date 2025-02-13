@@ -19,8 +19,8 @@ if not os.path.exists(log_dir):
 
 battery = BatteryModule(
     min_capacity=0,
-    max_capacity=120,  # Maximum battery capacity in kWh
-    max_charge=15,     # Maximum charging rate in kW
+    max_capacity=160,  # Maximum battery capacity in kWh
+    max_charge=20,     # Maximum charging rate in kW
     max_discharge=30,  # Maximum discharging rate in kW                                                                                                      
     efficiency=1.0,    # Battery efficiency
     init_soc=0.5       # Initial state of charge (50%)
@@ -124,7 +124,6 @@ class MicrogridState:
         self.csv_headers = ['Episode', 'Step', 'Battery_SOC', 'PV_Power', 'Load_Demand', 
                        'Time_Hour', 'Net_Load', 'Action', 'Reward','Battery_Degradation', 'Remaining_Capacity', 'Cycle_Count']
         
-        self.MAX_PENALTY = 50 #max penalty set
         self.battery_data = []
         self.state_space = {
             'battery_soc': 0.0,
@@ -135,10 +134,10 @@ class MicrogridState:
             'battery_health': 100.0
         }
         self.battery_degradation = BatteryDegradation()
-        self.SOC_MIN = 0.2
-        self.SOC_OPTIMAL_MIN = 0.3
-        self.SOC_OPTIMAL_MAX = 0.85
-        self.SOC_MAX = 0.9
+        self.SOC_MIN = 0
+        self.SOC_OPTIMAL_MIN = 0.2
+        self.SOC_OPTIMAL_MAX = 0.9
+        self.SOC_MAX = 1
         self.renewable = renewable
         self.battery = battery
         self.current_episode = 0
@@ -181,20 +180,13 @@ class MicrogridState:
         return self.discretize_state()
     
     def discretize_state(self):
-   
-        
         # Battery state discretization
-        if self.state_space['battery_soc'] < self.SOC_MIN:
+        if self.state_space['battery_soc'] < self.SOC_OPTIMAL_MIN:
             battery_state = 0
-        elif self.state_space['battery_soc'] < self.SOC_OPTIMAL_MIN:
-            battery_state = 1
         elif self.SOC_OPTIMAL_MIN <= self.state_space['battery_soc'] < self.SOC_OPTIMAL_MAX:
-            battery_state = 2
-        elif self.state_space['battery_soc'] < self.SOC_MAX:
-            battery_state = 3
+            battery_state = 1
         else:
-            battery_state = 4
-       
+            battery_state = 2
         # PV state is always 0 since we only have one state
         pv_state = 0
         
@@ -202,14 +194,10 @@ class MicrogridState:
         load_state = 0
        
         # Time state discretization
-        if self.state_space['time_hour'] < 6:
-            time_state = 0
-        elif self.state_space['time_hour'] < 12:
-            time_state = 1
-        elif self.state_space['time_hour'] < 18:
-            time_state = 2
+        if (7 <= self.state_space['time_hour'] < 11) or (17 <= self.state_space['time_hour'] < 21):
+           time_state = 1  # On-peak hours
         else:
-            time_state = 3
+            time_state = 0  # Off-peak hours
             
         return (battery_state, pv_state, load_state, time_state)
            
@@ -332,7 +320,15 @@ class MicrogridState:
         # Total cost: base load + battery charging - export revenue
         total_cost = base_cost + battery_charge_cost - battery_export_revenue
         
-        reward = -total cost 
+        penalty = 0
+        current_soc = self.state_space['battery_soc']
+
+        if current_soc < self.SOC_OPTIMAL_MIN:
+            penalty += (self.SOC_OPTIMAL_MIN - current_soc) * 10  # Example weight for penalty
+        elif current_soc > self.SOC_OPTIMAL_MAX:
+            penalty += (current_soc - self.SOC_OPTIMAL_MAX) * 10  
+        
+        reward = -total_cost - penalty
         
         return reward, total_cost
         
@@ -357,10 +353,10 @@ class MicrogridState:
 class QLearningAgent:
     def __init__(self, n_states, n_actions, learning_rate, discount_factor, epsilon):
         # Calculate the actual state space size based on the discrete state components
-        self.battery_states = 5  # 0 to 4
+        self.battery_states = 3  # 0 to 4
         self.pv_states = 1      # 0 
         self.load_states = 1   # 0 
-        self.time_states = 4    # 0 to 3
+        self.time_states = 2   # 0 to 1
         
         # Calculate total number of states
         self.n_states = self.battery_states * self.pv_states * self.load_states * self.time_states
@@ -370,7 +366,6 @@ class QLearningAgent:
         self.learning_rate = learning_rate
         self.discount_factor = discount_factor
         self.epsilon = epsilon
-        self.epsilon_decay = 0.995
         self.epsilon_min = 0.01
 
     def get_state_index(self, state):
@@ -436,9 +431,6 @@ class QLearningAgent:
             
         except Exception as e:
             print(f"Error in learn: {e}")
-
-    def decay_epsilon(self):
-        self.epsilon = max(self.epsilon_min, self.epsilon * self.epsilon_decay)
         
 def train_microgrid(env, agent, n_episodes, max_steps):
     episode_rewards = []
@@ -506,9 +498,6 @@ def train_microgrid(env, agent, n_episodes, max_steps):
         # Convert episode data to DataFrame and append to battery_data
         episode_df = pd.DataFrame(episode_data)
         env.battery_data.append(episode_df)
-        
-        # Update agent exploration rate
-        agent.decay_epsilon()
         
         # Store episode metrics
         episode_rewards.append(total_reward)
@@ -962,15 +951,15 @@ def main():
     
     # Initialize agent with correct state space size
     agent = QLearningAgent(
-        n_states=20,  # battery_states * pv_states * load_states * time_states
+        n_states=6,  # battery_states * pv_states * load_states * time_states
         n_actions=2,       # charge or discharge
-        learning_rate=0.1,
+        learning_rate=0.13,
         discount_factor=0.99,
         epsilon=1.0
     )
     
     # Training parameters
-    n_episodes = 4000
+    n_episodes = 7000
     max_steps_per_episode = 24  # One day
     
     # Define load demand and PV generation
