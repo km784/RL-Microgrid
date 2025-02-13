@@ -325,58 +325,65 @@ class MicrogridState:
     def calculate_reward(self, control_dict):
         # Get current tariff rates
         tariff = self.get_current_tariff()
-
-        # Calculate grid interactions
-        grid_import = 30
-        grid_export = control_dict.get('grid_export', 0)
-
-        # Calculate costs and revenues
-        grid_cost = grid_import * tariff['consumption']
-        grid_revenue = grid_export * tariff['injection']
-        actual_cost = grid_cost - grid_revenue
-
-        # Calculate the penalty for charging/discharging over SOC limits
-        current_soc = self.state_space['battery_soc']
+        hour = self.state_space['time_hour']
+        
+        # Base cost calculation - always buying 30 kWh
+        base_cost = 30 * tariff['consumption']  # 30 kWh * current rate
+        
+        # Initialize penalty
         penalty = 0
-        if current_soc < self.SOC_MIN or current_soc > self.SOC_MAX:
-            penalty = -self.MAX_PENALTY  # Apply maximum penalty if SOC is out of bounds
-
-        # Calculate the reward
-        reward = -actual_cost + penalty
-
-        return reward, actual_cost
+        
+        # Check if we're in peak or off-peak hours
+        is_peak_hour = (7 <= hour < 11) or (17 <= hour < 21)
+        print(f"""
+        Hour: {hour}
+        Is Peak: {is_peak_hour}
+        Tariff Rate: {tariff['consumption']}
+        Base Cost: {base_cost}
+        Battery Charge Amount: {control_dict['battery_charge']}
+        Battery Discharge Amount: {control_dict['battery_discharge']}
+        """)
+        # Calculate penalties and adjust reward (not cost) based on battery actions
+        if control_dict['battery_charge'] > 0:  # Battery charging
+            if is_peak_hour:
+                # Penalty for charging during peak hours
+                penalty -= 10
+                # Add charging cost to base cost
+                base_cost += control_dict['battery_charge'] * tariff['consumption']
+                print(f"Added charging cost: {control_dict['battery_charge'] * tariff['consumption']}")
+                
+        if control_dict['battery_discharge'] > 0:  # Battery discharging
+            if not is_peak_hour:
+                # Penalty for discharging during off-peak hours
+                penalty -= 10
+            else:
+                # Add reward (not cost reduction) for strategic discharge
+                penalty += control_dict['battery_discharge'] * tariff['injection']
+        
+        # Reward = negative cost plus penalties/bonuses
+        reward = -base_cost + penalty
+        print(f"Added discharge bonus to penalty: {control_dict['battery_discharge'] * tariff['injection']}")
+    
+        print(f"Final base_cost: {base_cost}, penalty: {penalty}")
+        return reward, base_cost
         
     def min_cost(self, pv_generation, load_demand):
         """
-        Calculate the theoretical minimum cost with no PV generation
+        Calculate the theoretical minimum cost for a full day
+        with no battery actions, just buying the required 30 kWh each hour
         """
-        pv_generation = np.array(pv_generation)
-        load_demand = np.array(load_demand)
-
-        absolute_min_cost = 0
-
-        # Check if we're calculating for a single timestep or full day
-        if len(load_demand) == 1:
-            # Single timestep calculation
-            hour = self.state_space['time_hour']
+        total_min_cost = 0
+        
+        # For each hour of the day
+        for hour in range(24):
+            # Determine if it's peak hours
             is_peak = (7 <= hour < 11) or (17 <= hour < 21)
+            # Use appropriate rate
             rate = 0.17 if is_peak else 0.13
-            injection_rate = 0.10 if is_peak else 0.07  # Peak or off-peak rate
-            
-            net_load = load_demand[0]
-            
-            if net_load > 0:  # Buy from grid
-                absolute_min_cost += net_load * rate
-            else:  # Sell excess to grid
-                absolute_min_cost += net_load * injection_rate  # Negative cost = revenue
-        else:
-            # Full day calculation
-            for hour in range(24):
-                is_peak = (7 <= hour < 11) or (17 <= hour < 21)
-                rate = 0.17 if is_peak else 0.13  # Peak or off-peak rate
-                absolute_min_cost += load_demand[hour] * rate
-
-        return absolute_min_cost
+            # Always buying 30 kWh
+            total_min_cost += 30 * rate
+        
+        return total_min_cost
 
 class QLearningAgent:
     def __init__(self, n_states, n_actions, learning_rate, discount_factor, epsilon):
