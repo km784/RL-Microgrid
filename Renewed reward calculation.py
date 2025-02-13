@@ -11,10 +11,14 @@ def calculate_reward(self, control_dict):
         # Total cost: base load + battery charging - export revenue
         total_cost = base_cost + battery_charge_cost - battery_export_revenue
         
-        
-        reward = -total cost + penalty
-        
-        return -total_cost, total_cost
-        total_reward = np.clip(total_reward, -100, 100)
+        penalty = 0
+        current_soc = self.state_space['battery_soc']
 
-        return total_reward, actual_cost
+        if current_soc < self.SOC_OPTIMAL_MIN:
+            penalty += (self.SOC_OPTIMAL_MIN - current_soc) * 10  # Example weight for penalty
+        elif current_soc > self.SOC_OPTIMAL_MAX:
+            penalty += (current_soc - self.SOC_OPTIMAL_MAX) * 10  
+        
+        reward = -total_cost - penalty
+        
+        return reward, total_cost
