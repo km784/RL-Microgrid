@@ -225,7 +225,7 @@ class MicrogridState:
         return next_state, reward, done
     
     def actions_agent(self, action):
-    # Log initial state
+        # Log initial state
         net_load = self.state_space['load_demand'] - self.state_space['pv_power']
         current_soc = self.state_space['battery_soc']
         
@@ -239,14 +239,14 @@ class MicrogridState:
             self.battery.max_discharge,
             (current_soc - self.SOC_MIN) * self.battery.max_capacity
         )
+        
         control_dict = {
-            'grid_import': 30,
+            'grid_import': 30,  # Base load always needs to be imported
             'grid_export': 0,
             'battery_charge': 0,
             'battery_discharge': 0,
             'pv_consumed': 0
         }
-        action_type = ''
         
         if action == 0:  # Charge battery from the grid
             action_type = 'CHARGE_BATTERY'
@@ -256,25 +256,16 @@ class MicrogridState:
                 new_soc = current_soc + (charge_amount / self.battery.max_capacity)
                 self.state_space['battery_soc'] = min(new_soc, self.SOC_MAX)
                 
-                control_dict = {
-                    'pv_consumed': 0,
+                control_dict.update({
                     'battery_charge': charge_amount,
+                    'grid_import': 30 + charge_amount,  # Base load plus charging
                     'battery_discharge': 0,
-                    'grid_import': charge_amount,
                     'grid_export': 0
-                }
+                })
                 self.last_degradation = self.battery_degradation.calculate_cycle_degradation(
                     energy_throughput=charge_amount,
                     depth_of_discharge=1 - current_soc
                 )
-            else:
-                control_dict = {
-                    'pv_consumed': 0,
-                    'battery_charge': 0,
-                    'battery_discharge': 0,
-                    'grid_import': 0,
-                    'grid_export': 0
-                }
                 
         elif action == 1:  # Discharge battery to the grid
             action_type = 'DISCHARGE_BATTERY'
@@ -284,29 +275,29 @@ class MicrogridState:
                 new_soc = current_soc - (discharge_amount / self.battery.max_capacity)
                 self.state_space['battery_soc'] = max(new_soc, self.SOC_MIN)
                 
-                control_dict = {
-                    'pv_consumed': 0,
+                control_dict.update({
                     'battery_charge': 0,
                     'battery_discharge': discharge_amount,
-                    'grid_import': 0,
+                    'grid_import': 30,  # Only base load
                     'grid_export': discharge_amount
-                }
+                })
                 self.last_degradation = self.battery_degradation.calculate_cycle_degradation(
                     energy_throughput=discharge_amount,
                     depth_of_discharge=current_soc
                 )
-            else:
-                control_dict = {
-                    'pv_consumed': 0,
-                    'battery_charge': 0,
-                    'battery_discharge': 0,
-                    'grid_import': 0,
-                    'grid_export': 0
-                }
                 
+        else:  # action == 2: Do nothing (new action)
+            action_type = 'DO_NOTHING'
+            control_dict.update({
+                'battery_charge': 0,
+                'battery_discharge': 0,
+                'grid_import': 30,  # Only base load
+                'grid_export': 0
+            })
+            self.last_degradation = 0  # No degradation when doing nothing
+            
         return control_dict
-        # Remove the underscore from the method definition
-        
+
     def calculate_reward(self, control_dict):
         tariff = self.get_current_tariff()
         
@@ -324,9 +315,9 @@ class MicrogridState:
         current_soc = self.state_space['battery_soc']
 
         if current_soc < self.SOC_OPTIMAL_MIN:
-            penalty += (self.SOC_OPTIMAL_MIN - current_soc) * 10  # Example weight for penalty
+            penalty += (self.SOC_OPTIMAL_MIN - current_soc) * 15 # Example weight for penalty
         elif current_soc > self.SOC_OPTIMAL_MAX:
-            penalty += (current_soc - self.SOC_OPTIMAL_MAX) * 10  
+            penalty += (current_soc - self.SOC_OPTIMAL_MAX) * 15 
         
         reward = -total_cost - penalty
         
@@ -363,10 +354,16 @@ class QLearningAgent:
         
         # Initialize Q-table with correct dimensions
         self.q_table = np.zeros((self.n_states, n_actions))
+        
         self.learning_rate = learning_rate
         self.discount_factor = discount_factor
+        
         self.epsilon = epsilon
         self.epsilon_min = 0.01
+        self.epsilon_decay = 0.999
+        
+        self.exploration_rates = []
+        self.episode_count = 0
 
     def get_state_index(self, state):
         """
@@ -431,6 +428,12 @@ class QLearningAgent:
             
         except Exception as e:
             print(f"Error in learn: {e}")
+            
+    def decay_epsilon(self):
+        """Decay epsilon after each episode"""
+        self.epsilon = max(self.epsilon_min, self.epsilon * self.epsilon_decay)
+        self.exploration_rates.append(self.epsilon)
+        self.episode_count += 1
         
 def train_microgrid(env, agent, n_episodes, max_steps):
     episode_rewards = []
@@ -453,7 +456,7 @@ def train_microgrid(env, agent, n_episodes, max_steps):
         
         total_reward = 0
         total_cost = 0
-        state = env.update_state()  # Get initial state
+        state = env.update_state()
         episode_data = []
         
         for step in range(max_steps):
@@ -464,7 +467,7 @@ def train_microgrid(env, agent, n_episodes, max_steps):
                 'Battery_SOC': env.state_space['battery_soc'],
                 'PV_Power': env.state_space['pv_power'],
                 'Load_Demand': env.state_space['load_demand'],
-                'Net_Load': env.state_space['net_load']
+                'Net_Load': env.state_space['net_load'],  # Track exploration rate
             }
             
             # Get action from agent
@@ -472,6 +475,9 @@ def train_microgrid(env, agent, n_episodes, max_steps):
             
             # Take step in environment
             next_state, reward, done = env.step(action)
+            
+            # Agent learning
+            agent.learn(state, action, reward, next_state)
             
             # Store step data
             step_data.update({
@@ -486,14 +492,14 @@ def train_microgrid(env, agent, n_episodes, max_steps):
             total_cost += env.last_cost
             total_reward += reward
             
-            # Agent learning
-            agent.learn(state, action, reward, next_state)
-            
             # Update state
             state = next_state
             
             if done:
                 break
+        
+        # Decay epsilon after each episode
+        agent.decay_epsilon()
         
         # Convert episode data to DataFrame and append to battery_data
         episode_df = pd.DataFrame(episode_data)
@@ -503,9 +509,10 @@ def train_microgrid(env, agent, n_episodes, max_steps):
         episode_rewards.append(total_reward)
         episode_costs.append(total_cost)
         
-        # Print progress
+        # Print progress with current exploration rate
         if episode % 10 == 0:
-            print(f"Episode {episode}/{n_episodes} completed. Total reward: {total_reward:.2f}")
+            print(f"Episode {episode}/{n_episodes} completed. "
+                  f"Total reward: {total_reward:.2f}, ")
     
     return episode_rewards, episode_costs, env.battery_data
 
@@ -611,7 +618,7 @@ def plot_soc_across_episodes(self, battery_data, save_path=None):
         logger.error(f"Error in plot_soc_across_episodes: {str(e)}")
         return None
     
-def plot_tariff_battery_relationship(env, battery_data, episodes_to_compare=[10, 99], save_path=None):
+def plot_tariff_battery_relationship(env, battery_data, episodes_to_compare=[1000, 5000], save_path=None):
     """
     Plot injection tariff rates and battery SOC against time, comparing two episodes.
     Fixed version that prevents duplicate plotting of battery SOC.
@@ -720,7 +727,7 @@ def plot_tariff_battery_relationship(env, battery_data, episodes_to_compare=[10,
     
     return fig
 
-def plot_battery_actions_soc_comparison(env, battery_data, episodes_to_compare=[10, 2999], save_path=None):
+def plot_battery_actions_soc_comparison(env, battery_data, episodes_to_compare=[100, 2999], save_path=None):
     """
     Create a visualization comparing agent behavior across different episodes
     to demonstrate learning progress
@@ -788,9 +795,11 @@ def plot_battery_actions_soc_comparison(env, battery_data, episodes_to_compare=[
         for _, row in episode_data.iterrows():
             if row['Action'] == 0:  # Charge
                 ax2.bar(row['Time_Hour'], 1, color='green', alpha=0.6, width=0.8)
-            else:  # Discharge
+            elif row['Action'] == 1: # Discharge
                 ax2.bar(row['Time_Hour'], -1, color='red', alpha=0.6, width=0.8)
-        
+            else:  #do nothing
+                ax2.bar(row['Time_Hour'], 0, color='gray', alpha=0.3, width=0.8)
+                
         # Add peak hour shading
         peak_periods = [(7, 11), (17, 21)]
         for start, end in peak_periods:
@@ -806,8 +815,8 @@ def plot_battery_actions_soc_comparison(env, battery_data, episodes_to_compare=[
         
         ax2.set_xlabel('Time of Day (Hour)', fontsize=12)
         ax2.set_ylabel('Agent Actions', fontsize=12)
-        ax2.set_yticks([-1, 1])
-        ax2.set_yticklabels(['Discharge', 'Charge'])
+        ax2.set_yticks([-1 ,0, 1])
+        ax2.set_yticklabels(['Discharge', 'No Action', 'Charge'])
         ax2.grid(True, alpha=0.3)
         
         # Add episode-specific title
@@ -839,9 +848,9 @@ def plot_battery_actions_soc_comparison(env, battery_data, episodes_to_compare=[
     # Add learning progress summary
     summary_text = (
         f"Learning Progress:\n"
-        f"Optimal Range Time: {learning_metrics[10]['optimal_range_time']:.1f}% → {learning_metrics[2999]['optimal_range_time']:.1f}%\n"
-        f"Strategic Peak Discharges: {learning_metrics[10]['peak_discharges']} → {learning_metrics[2999]['peak_discharges']}\n"
-        f"Strategic Off-Peak Charges: {learning_metrics[10]['off_peak_charges']} → {learning_metrics[2999]['off_peak_charges']}"
+        f"Optimal Range Time: {learning_metrics[100]['optimal_range_time']:.1f}% → {learning_metrics[2999]['optimal_range_time']:.1f}%\n"
+        f"Strategic Peak Discharges: {learning_metrics[100]['peak_discharges']} → {learning_metrics[2999]['peak_discharges']}\n"
+        f"Strategic Off-Peak Charges: {learning_metrics[100]['off_peak_charges']} → {learning_metrics[2999]['off_peak_charges']}"
     )
     
     plt.figtext(0.02, 0.02, summary_text,
@@ -952,14 +961,14 @@ def main():
     # Initialize agent with correct state space size
     agent = QLearningAgent(
         n_states=6,  # battery_states * pv_states * load_states * time_states
-        n_actions=2,       # charge or discharge
-        learning_rate=0.13,
+        n_actions=3,       # charge or discharge do nothing
+        learning_rate=0.2,
         discount_factor=0.99,
         epsilon=1.0
     )
     
     # Training parameters
-    n_episodes = 7000
+    n_episodes = 10000
     max_steps_per_episode = 24  # One day
     
     # Define load demand and PV generation
