@@ -100,24 +100,35 @@ class MicrogridState:
         return self.discretize_state()
     
     def discretize_state(self):
-        # Battery state discretization
-        if self.state_space['battery_soc'] < self.SOC_OPTIMAL_MIN:
+            # Battery state discretization
+        if self.state_space['battery_soc'] < 0.2:
             battery_state = 0
-        elif self.SOC_OPTIMAL_MIN <= self.state_space['battery_soc'] < self.SOC_OPTIMAL_MAX:
+        elif self.state_space['battery_soc'] < 0.4:
             battery_state = 1
-        else:
+        elif self.state_space['battery_soc'] < 0.6:
             battery_state = 2
+        elif self.state_space['battery_soc'] < 0.8:
+            battery_state = 3
+        else:
+            battery_state = 4
         # PV state is always 0 since we only have one state
         pv_state = 0
         
         # Load state is always 0 since we only have one state
         load_state = 0
        
-        # Time state discretization
-        if (7 <= self.state_space['time_hour'] < 11) or (17 <= self.state_space['time_hour'] < 21):
-           time_state = 1  # On-peak hours
-        else:
-            time_state = 0  # Off-peak hours
+        hour = self.state_space['time_hour']
+    
+        if 0 <= hour < 7:  # Night/Early Morning Off-Peak
+            time_state = 0
+        elif 7 <= hour < 11:  # Morning Peak
+            time_state = 1
+        elif 11 <= hour < 17:  # Midday Off-Peak
+            time_state = 2
+        elif 17 <= hour < 21:  # Evening Peak
+            time_state = 3
+        else:  # Late Night Off-Peak (21-24)
+            time_state = 4
     
             
         return (battery_state, pv_state, load_state, time_state)
@@ -303,17 +314,8 @@ class MicrogridState:
         # Calculate net cost after considering revenue
         net_cost = total_cost - battery_export_revenue
         
-        # Calculate penalty for SOC outside optimal range
-        penalty = 0
-        current_soc = self.state_space['battery_soc']
-        
-        if current_soc < self.SOC_OPTIMAL_MIN:
-            penalty += (self.SOC_OPTIMAL_MIN - current_soc) * 15
-        elif current_soc > self.SOC_OPTIMAL_MAX:
-            penalty += (current_soc - self.SOC_OPTIMAL_MAX) * 15
-        
         # Reward is negative of net cost minus any penalties
-        reward = -net_cost - penalty
+        reward = -net_cost 
         
         return reward, net_cost
         
@@ -392,10 +394,10 @@ class MicrogridState:
 class QLearningAgent:
     def __init__(self, n_states, n_actions, learning_rate, discount_factor, epsilon):
         # Calculate the actual state space size based on the discrete state components
-        self.battery_states = 3  # 0 to 4
+        self.battery_states = 5 # 0 to 4
         self.pv_states = 1      # 0 
         self.load_states = 1   # 0 
-        self.time_states = 2   # 0 to 1
+        self.time_states = 5  # 0 to 4
         
         # Calculate total number of states
         self.n_states = self.battery_states * self.pv_states * self.load_states * self.time_states
@@ -1137,7 +1139,7 @@ def main():
     microgrid_env = MicrogridState()
     
     agent = QLearningAgent(
-        n_states=6,
+        n_states=25,
         n_actions=3,
         learning_rate=0.1,
         discount_factor=0.95,
