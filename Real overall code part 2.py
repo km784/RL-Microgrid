@@ -298,6 +298,8 @@ class MicrogridState:
 
     def calculate_reward(self, control_dict):
         tariff = self.get_current_tariff()
+        current_soc = self.state_space['battery_soc']
+        is_peak = (7 <= self.state_space['time_hour'] < 11) or (17 <= self.state_space['time_hour'] < 21)
         
         # Base load cost (always need to import 30 kWh)
         base_cost = 30 * tariff['consumption']
@@ -907,7 +909,7 @@ def plot_tariff_battery_relationship(env, battery_data, episodes_to_compare=[100
     
     return fig
 
-def plot_battery_actions_soc_comparison(env, battery_data, episodes_to_compare=[80, 3000], save_path=None):
+def plot_battery_actions_soc_comparison(env, battery_data, episodes_to_compare=[80, 8500], save_path=None):
     """
     Create a visualization comparing agent behavior across different episodes
     to demonstrate learning progress
@@ -1028,9 +1030,9 @@ def plot_battery_actions_soc_comparison(env, battery_data, episodes_to_compare=[
     # Add learning progress summary
     summary_text = (
         f"Learning Progress:\n"
-        f"Optimal Range Time: {learning_metrics[80]['optimal_range_time']:.1f}% → {learning_metrics[3000]['optimal_range_time']:.1f}%\n"
-        f"Strategic Peak Discharges: {learning_metrics[80]['peak_discharges']} → {learning_metrics[3000]['peak_discharges']}\n"
-        f"Strategic Off-Peak Charges: {learning_metrics[80]['off_peak_charges']} → {learning_metrics[3000]['off_peak_charges']}"
+        f"Optimal Range Time: {learning_metrics[80]['optimal_range_time']:.1f}% → {learning_metrics[8500]['optimal_range_time']:.1f}%\n"
+        f"Strategic Peak Discharges: {learning_metrics[80]['peak_discharges']} → {learning_metrics[8500]['peak_discharges']}\n"
+        f"Strategic Off-Peak Charges: {learning_metrics[80]['off_peak_charges']} → {learning_metrics[8500]['off_peak_charges']}"
     )
     
     plt.figtext(0.02, 0.02, summary_text,
@@ -1142,7 +1144,7 @@ def main():
         n_states=25,
         n_actions=3,
         learning_rate=0.1,
-        discount_factor=0.95,
+        discount_factor=0.99,
         epsilon=1.0
     )
     
@@ -1168,7 +1170,7 @@ def main():
         print("Training completed. Creating plots...")
         
         # Debug specific episodes after training is complete
-        episodes_to_debug = [0, 1000, 3000]  # Debug start, middle, and end episodes
+        episodes_to_debug = [0, 1000, 8000]  # Debug start, middle, and end episodes
         for episode_num in episodes_to_debug:
             # Make sure episode_num is within the range of available data
             if episode_num < len(battery_data):
