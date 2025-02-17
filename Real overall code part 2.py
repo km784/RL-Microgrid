@@ -99,21 +99,27 @@ class MicrogridState:
         return self.discretize_state()
     
     def discretize_state(self):
-            # Battery state discretization
+             # Battery state discretization
         if self.state_space['battery_soc'] < self.SOC_MIN:
             battery_state = 0
         elif self.state_space['battery_soc'] < self.SOC_OPTIMAL_MIN:
             battery_state = 1
         elif self.state_space['battery_soc'] < 0.3:
             battery_state = 2
-        elif self.state_space['battery_soc'] < 0.5:
+        elif self.state_space['battery_soc'] < 0.4:
             battery_state = 3
-        elif self.state_space['battery_soc'] < 0.7:
+        elif self.state_space['battery_soc'] < 0.5:
             battery_state = 4
-        elif self.state_space['battery_soc'] < self.SOC_OPTIMAL_MAX:
+        elif self.state_space['battery_soc'] < 0.6:
             battery_state = 5
-        else:
+        elif self.state_space['battery_soc'] < 0.7:
             battery_state = 6
+        elif self.state_space['battery_soc'] < 0.8:
+            battery_state = 7
+        elif self.state_space['battery_soc'] < self.SOC_OPTIMAL_MAX:
+            battery_state = 8
+        else:
+            battery_state = 9
         # PV state is always 0 since we only have one state
         pv_state = 0
         
@@ -450,7 +456,7 @@ class MicrogridState:
 class QLearningAgent:
     def __init__(self, n_states, n_actions, learning_rate, discount_factor, epsilon):
         # Calculate the actual state space size based on the discrete state components
-        self.battery_states = 7  # 0 to 6
+        self.battery_states = 10  # 0 to 6
         self.pv_states = 1      # 0 
         self.load_states = 1    # 0 
         self.time_states = 5    # 0 to 4
@@ -1210,7 +1216,7 @@ def main():
     microgrid_env = MicrogridState()
     
     agent = QLearningAgent(
-        n_states=35,
+        n_states=50,
         n_actions=3,
         learning_rate=0.15,
         discount_factor=0.99,
