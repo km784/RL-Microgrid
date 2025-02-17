@@ -569,7 +569,7 @@ class QLearningAgent:
         else:
             # If costs rise again, re-enable adaptive decay
             self.switched_to_exploitation = False  
-            decay_rate = 0.9995 if self.episode_count < 5000 else 0.999
+            decay_rate = 0.9995 if self.episode_count < 10000 else 0.999
             self.epsilon = max(self.epsilon_min, self.epsilon * decay_rate)
 
         self.exploration_rates.append(self.epsilon)
