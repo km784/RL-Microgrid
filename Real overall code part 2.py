@@ -56,6 +56,7 @@ class MicrogridState:
             'net_load': 0.0,
             'battery_health': 100.0
         }
+        
         self.SOC_MIN = 0
         self.SOC_OPTIMAL_MIN = 0.1
         self.SOC_OPTIMAL_MAX = 0.9
@@ -380,13 +381,12 @@ class MicrogridState:
         reward = -net_cost
         
         return reward, net_cost
-        
+    
     def min_cost(self, pv_generation, load_demand):
         """
         Calculate the theoretical minimum cost for a full day with detailed debugging output
         """
-        total_cost = 0
-        
+        total_cost = 0        
         # Battery parameters
         max_charge_per_hour = self.battery.max_charge      # 60 kW
         max_discharge_per_hour = self.battery.max_discharge # 40 kW
@@ -471,14 +471,14 @@ class QLearningAgent:
         self.learning_rate = learning_rate
         self.intial_learning_rate = learning_rate
         self.min_learning_rate = 0.01
-        self.learning_rate_decay = 0.995
+        self.learning_rate_decay = 0.9991
         
         
         self.discount_factor = discount_factor
         
         self.epsilon = epsilon
         self.epsilon_min = 0.01
-        self.epsilon_decay = 0.995
+        self.epsilon_decay = 0.99998
         
         self.replay_buffer = []
         self.replay_buffer_size = 10000
@@ -545,38 +545,50 @@ class QLearningAgent:
         Update Q-values with experience replay and double Q-learning
         """
         try:
+            # Add debugging for last episode
+            if self.episode_count == 19999:  # Last episode
+                print(f"\nDebug Q-value update for last episode:")
+                print(f"State: {state}")
+                print(f"Action: {action}")
+                print(f"Reward: {reward}")
+                print(f"Next State: {next_state}")
+            
             # Store experience
             self.replay_buffer.append((state, action, reward, next_state))
             if len(self.replay_buffer) > self.replay_buffer_size:
                 self.replay_buffer.pop(0)
             
-            # Only learn if we have enough experiences
-            if len(self.replay_buffer) < self.batch_size:
-                return
+            # Get state indices
+            state_idx = self.get_state_index(state)
+            next_state_idx = self.get_state_index(next_state)
             
-            # Sample batch from replay buffer
-            batch = random.sample(self.replay_buffer, self.batch_size)
+            if self.episode_count == 19999:
+                print(f"State Index: {state_idx}")
+                print(f"Next State Index: {next_state_idx}")
+                print(f"Current Q-value: {self.q_table[state_idx, action]}")
             
-            for exp_state, exp_action, exp_reward, exp_next_state in batch:
-                state_idx = self.get_state_index(exp_state)
-                next_state_idx = self.get_state_index(exp_next_state)
-                
-                # Current Q-value
-                current_q = self.q_table[state_idx, exp_action]
-                
-                # Next state maximum Q-value
-                next_max_q = np.max(self.q_table[next_state_idx, :])
-                
-                # Calculate target Q-value with clipping
-                target_q = exp_reward + self.discount_factor * next_max_q
-                target_q = np.clip(target_q, -1000, 1000)
-                
-                # Update Q-value with smaller learning rate
-                self.q_table[state_idx, exp_action] = current_q + \
-                    self.learning_rate * (target_q - current_q)
+            # Current Q-value
+            current_q = self.q_table[state_idx, action]
             
+            # Next state maximum Q-value
+            next_max_q = np.max(self.q_table[next_state_idx, :])
+            
+            # Calculate target Q-value with clipping
+            target_q = reward + self.discount_factor * next_max_q
+            target_q = np.clip(target_q, -1000, 1000)
+            
+            # Update Q-value
+            self.q_table[state_idx, action] = current_q + \
+                self.learning_rate * (target_q - current_q)
+                
+            if self.episode_count == 19999:
+                print(f"Updated Q-value: {self.q_table[state_idx, action]}\n")
+                
         except Exception as e:
             logging.error(f"Error in learn: {e}")
+            if self.episode_count == 19999:
+                logging.error(f"Debug info - State: {state}, Action: {action}")
+
             
     def adaptive_epsilon_decay(self, current_cost, min_cost, tolerance=0.01):
         """
@@ -607,7 +619,7 @@ class QLearningAgent:
                     logging.info(f"Average cost: £{avg_recent_cost:.2f}")
                     self.switched_to_exploitation = False
                     
-                decay_rate = 0.9995 if self.episode_count < 15000 else 0.999
+                decay_rate = 0.99998 if self.episode_count < 32000 else 0.9995  # Adjusted decay rate
                 self.epsilon = max(self.epsilon_min, self.epsilon * decay_rate)
 
             self.exploration_rates.append(self.epsilon)
@@ -616,11 +628,34 @@ class QLearningAgent:
         except Exception as e:
                 logging.error(f"Error in adaptive_epsilon_decay: {e}")
                 
-def train_microgrid(env, agent, n_episodes, max_steps, min_cost):
+    def save_policy(self, filepath):
+        """Save the Q-table (policy) to a file"""
+        try:
+            # Ensure the directory exists
+            os.makedirs(os.path.dirname(filepath), exist_ok=True)
+            # Save the Q-table using numpy's save function
+            np.save(filepath, self.q_table)
+            print(f"Policy saved successfully to {filepath}")
+        except Exception as e:
+            print(f"Error saving policy: {str(e)}")
+
+    def load_policy(self, filepath):
+        """Load the Q-table (policy) from a file"""
+        try:
+            if os.path.exists(filepath):
+                self.q_table = np.load(filepath)
+                print(f"Policy loaded successfully from {filepath}")
+            else:
+                print(f"No policy file found at {filepath}")
+        except Exception as e:
+            print(f"Error loading policy: {str(e)}")
+            
+                
+def train_microgrid(env, agent, n_episodes, max_steps, min_cost, policy_save_path):
     episode_rewards = []
     episode_costs = []
     env.battery_data = []
-    initial_soc = 0.8
+    initial_soc = 1
     
     # Initialize best tracking variables
     best_cost = float('inf')
@@ -633,6 +668,39 @@ def train_microgrid(env, agent, n_episodes, max_steps, min_cost):
     
     for episode in range(n_episodes):
         try:
+            # Add Q-table verification at start of last episode
+            if episode == n_episodes - 1:
+                print("\nStarting final episode...")
+                print("Q-table statistics:")
+                print(f"Number of non-zero values: {np.count_nonzero(agent.q_table)}")
+                print(f"Q-table mean: {np.mean(agent.q_table)}")
+                print(f"Q-table max: {np.max(agent.q_table)}")
+                print(f"Q-table min: {np.min(agent.q_table)}")
+                print("\nSample Q-values for key states at start of final episode:")
+                for battery_state in range(5):
+                    for time_state in range(5):
+                        state = (battery_state, 0, 0, time_state)
+                        state_idx = agent.get_state_index(state)
+                        time_labels = {
+                            0: "Night/Early Morning",
+                            1: "Morning Peak",
+                            2: "Midday Off-Peak",
+                            3: "Evening Peak",
+                            4: "Late Night"
+                        }
+                        battery_labels = {
+                            0: "Very Low SOC",
+                            1: "Low SOC",
+                            2: "Medium SOC",
+                            3: "High SOC",
+                            4: "Very High SOC"
+                        }
+                        print(f"\nState: {battery_labels[battery_state]}, {time_labels[time_state]}")
+                        print(f"Q-values for actions:")
+                        print(f"  Charge: {agent.q_table[state_idx, 0]:.3f}")
+                        print(f"  Discharge: {agent.q_table[state_idx, 1]:.3f}")
+                        print(f"  Do Nothing: {agent.q_table[state_idx, 2]:.3f}")
+            
             env.current_episode = episode
             env.current_step = 0
             
@@ -696,6 +764,9 @@ def train_microgrid(env, agent, n_episodes, max_steps, min_cost):
                 best_episode = episode
                 best_actions = episode_actions.copy()
                 
+                # Save the best policy
+                agent.save_policy(policy_save_path)
+                
                 print(f"\nNew best cost found!")
                 print(f"Episode: {episode}")
                 print(f"Cost: £{best_cost:.2f}")
@@ -709,6 +780,39 @@ def train_microgrid(env, agent, n_episodes, max_steps, min_cost):
                       f"Cost: £{total_cost:.2f} | "
                       f"Avg Cost (100 ep): £{avg_cost:.2f} | "
                       f"Epsilon: {agent.epsilon:.3f}")
+            
+            # Add Q-table verification at end of last episode
+            if episode == n_episodes - 1:
+                print("\nFinal episode completed")
+                print("Final Q-table statistics:")
+                print(f"Number of non-zero values: {np.count_nonzero(agent.q_table)}")
+                print(f"Q-table mean: {np.mean(agent.q_table)}")
+                print(f"Q-table max: {np.max(agent.q_table)}")
+                print(f"Q-table min: {np.min(agent.q_table)}")
+                print("\nFinal Q-values for key states:")
+                for battery_state in range(5):
+                    for time_state in range(5):
+                        state = (battery_state, 0, 0, time_state)
+                        state_idx = agent.get_state_index(state)
+                        time_labels = {
+                            0: "Night/Early Morning",
+                            1: "Morning Peak",
+                            2: "Midday Off-Peak",
+                            3: "Evening Peak",
+                            4: "Late Night"
+                        }
+                        battery_labels = {
+                            0: "Very Low SOC",
+                            1: "Low SOC",
+                            2: "Medium SOC",
+                            3: "High SOC",
+                            4: "Very High SOC"
+                        }
+                        print(f"\nState: {battery_labels[battery_state]}, {time_labels[time_state]}")
+                        print(f"Q-values for actions:")
+                        print(f"  Charge: {agent.q_table[state_idx, 0]:.3f}")
+                        print(f"  Discharge: {agent.q_table[state_idx, 1]:.3f}")
+                        print(f"  Do Nothing: {agent.q_table[state_idx, 2]:.3f}")
                 
         except Exception as e:
             print(f"Error in episode {episode}: {str(e)}")
@@ -1067,7 +1171,7 @@ def plot_tariff_battery_relationship(env, battery_data, episodes_to_compare=[100
     
     return fig
 
-def plot_battery_actions_soc_comparison(env, battery_data, episodes_to_compare=[8200,17990,], save_path=None):
+def plot_battery_actions_soc_comparison(env, battery_data, episodes_to_compare=[8200,49999,], save_path=None):
     """
     Create a visualization comparing agent behavior across different episodes
     to demonstrate learning progress
@@ -1188,9 +1292,9 @@ def plot_battery_actions_soc_comparison(env, battery_data, episodes_to_compare=[
     # Add learning progress summary
     summary_text = (
         f"Learning Progress:\n"
-        f"Optimal Range Time: {learning_metrics[8200]['optimal_range_time']:.1f}% → {learning_metrics[17990]['optimal_range_time']:.1f}%\n"
-        f"Strategic Peak Discharges: {learning_metrics[8200]['peak_discharges']} → {learning_metrics[17990]['peak_discharges']}\n"
-        f"Strategic Off-Peak Charges: {learning_metrics[8200]['off_peak_charges']} → {learning_metrics[17990]['off_peak_charges']}"
+        f"Optimal Range Time: {learning_metrics[8200]['optimal_range_time']:.1f}% → {learning_metrics[49999]['optimal_range_time']:.1f}%\n"
+        f"Strategic Peak Discharges: {learning_metrics[8200]['peak_discharges']} → {learning_metrics[49999]['peak_discharges']}\n"
+        f"Strategic Off-Peak Charges: {learning_metrics[8200]['off_peak_charges']} → {learning_metrics[49999]['off_peak_charges']}"
     )
     
     plt.figtext(0.02, 0.02, summary_text,
@@ -1301,14 +1405,15 @@ def main():
     agent = QLearningAgent(
         n_states=50,
         n_actions=3,
-        learning_rate=0.15,
+        learning_rate=0.37,  # Faster learning rate
         discount_factor=0.99,
         epsilon=1.0
     )
     
-    n_episodes = 18000
+    n_episodes = 45000  # Adjusted number of episodes
     max_steps_per_episode = 24
     initial_soc = 1
+    policy_save_path = "best_policy.npy"
     
     # Calculate theoretical minimum cost
     load_demand = [30] * 24
@@ -1317,12 +1422,13 @@ def main():
     
     try:
         print("Starting training...")
-        episode_rewards, episode_costs, battery_data = train_microgrid(
+        episode_rewards, episode_costs, battery_data, best_episode, best_actions = train_microgrid(
             env=microgrid_env,
             agent=agent,
             n_episodes=n_episodes,
             max_steps=max_steps_per_episode,
-            min_cost=theoretical_min_cost
+            min_cost=theoretical_min_cost,
+            policy_save_path=policy_save_path
         )
         
         print("Training completed. Creating plots...")
@@ -1340,31 +1446,31 @@ def main():
         
         # Create and save plots
         plot_training_progress(episode_rewards, 
-                             save_path=os.path.join(log_dir, 'training_progress.png'))
+                             save_path=os.path.join("logs", 'training_progress.png'))
         
         plot_soc_across_episodes(
             microgrid_env,  # Use microgrid_env consistently
             battery_data,
-            save_path=os.path.join(log_dir, 'soc_across_episodes.png')
+            save_path=os.path.join("logs", 'soc_across_episodes.png')
         )
         
         plot_tariff_battery_relationship(
             microgrid_env,  # Use microgrid_env consistently
             battery_data,
-            save_path=os.path.join(log_dir, 'tariff_battery_relationship.png')
+            save_path=os.path.join("logs", 'tariff_battery_relationship.png')
         )
         
         plot_battery_actions_soc_comparison(
             microgrid_env,  # Use microgrid_env consistently
             battery_data,
-            save_path=os.path.join(log_dir, 'battery_actions_soc.png')
+            save_path=os.path.join("logs", 'battery_actions_soc.png')
         )
         
         plot_convergence_to_min_cost(
             episode_rewards,
             episode_costs,
             theoretical_min_cost,
-            save_path=os.path.join(log_dir, 'convergence.png')
+            save_path=os.path.join("logs", 'convergence.png')
         )
         
         print("All plots saved successfully.")
@@ -1377,5 +1483,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-
 
