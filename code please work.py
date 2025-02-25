@@ -11,6 +11,7 @@ import stat
 import os
 from datetime import datetime
 import time
+import random
 from helper_functions import *
 
 log_dir = "logs"
@@ -55,6 +56,7 @@ class MicrogridState:
             'net_load': 0.0,
             'battery_health': 100.0
         }
+        
         self.SOC_MIN = 0
         self.SOC_OPTIMAL_MIN = 0.1
         self.SOC_OPTIMAL_MAX = 0.9
@@ -67,7 +69,7 @@ class MicrogridState:
         self.last_reward = 0
         self.last_cost = 0
         self.last_degradation = 0
-        self.battery_capacity = 160
+        self.battery_capacity = 120
         
     def get_current_tariff(self):
         hour = self.state_space['time_hour']
@@ -83,11 +85,12 @@ class MicrogridState:
             }       
          
     def update_state(self):
+        
         # Update PV generation
         self.state_space['pv_power'] = self.renewable.current_obs
         
         # Update load demand
-        self.state_space['load_demand'] = 30  # constant load of 30kW
+        self.state_space['load_demand'] = 30 # constant load of 30kW
         
         # Update time
         self.state_space['time_hour'] = (self.state_space['time_hour'] + 1) % 24
@@ -95,26 +98,15 @@ class MicrogridState:
         # Update net load
         self.state_space['net_load'] = self.state_space['load_demand'] - self.state_space['pv_power']
         
-        # Add tariff rates as explicit state variables
-        tariff = self.get_current_tariff()
-        self.state_space['tariff_consumption'] = tariff['consumption']
-        self.state_space['tariff_injection'] = tariff['injection']
-        
-        # Normalize battery SOC to [0, 1]
-        self.state_space['battery_soc_normalized'] = self.state_space['battery_soc'] / self.SOC_MAX
-        
-        # Add historical context (e.g., last action)
-        self.state_space['last_action'] = self.last_action if self.last_action is not None else -1
-        
         return self.discretize_state()
     
     def discretize_state(self):
-    # Battery state discretization
-        if self.state_space['battery_soc'] < 0.1:
+            # Battery state discretization
+        if self.state_space['battery_soc'] < self.SOC_MIN:
             battery_state = 0
-        elif self.state_space['battery_soc'] < 0.2:
+        elif self.state_space['battery_soc'] < self.SOC_OPTIMAL_MIN:
             battery_state = 1
-        elif self.state_space['battery_soc'] < 0.3:
+        elif self.state_space['battery_soc'] < 0.25:
             battery_state = 2
         elif self.state_space['battery_soc'] < 0.4:
             battery_state = 3
@@ -122,11 +114,11 @@ class MicrogridState:
             battery_state = 4
         elif self.state_space['battery_soc'] < 0.6:
             battery_state = 5
-        elif self.state_space['battery_soc'] < 0.7:
+        elif self.state_space['battery_soc'] < 0.75:
             battery_state = 6
-        elif self.state_space['battery_soc'] < 0.8:
-            battery_state = 7
         elif self.state_space['battery_soc'] < self.SOC_OPTIMAL_MAX:
+            battery_state = 7
+        elif self.state_space['battery_soc'] < 0.9:
             battery_state = 8
         else:
             battery_state = 9
@@ -137,22 +129,18 @@ class MicrogridState:
         load_state = 0
        
         hour = self.state_space['time_hour']
-        
-        if 0 <= hour < 7:
-            time_to_peak = 7 - hour
-        elif 11 <= hour < 17:
-            time_to_peak = 17 - hour
-        else:
-            time_to_peak = (31 - hour) % 24  # Time to next day's peak
-            
-        if time_to_peak <= 2:
-            time_state = 4  # Very close to peak
-        elif time_to_peak <= 4:
-            time_state = 3  # Approaching peak
-        elif time_to_peak <= 6:
-            time_state = 2  # Getting closer to peak
-        else:
-            time_state = 1  # Far from peak
+    
+        if 0 <= hour < 7:  # Night/Early Morning Off-Peak
+            time_state = 0
+        elif 7 <= hour < 11:  # Morning Peak
+            time_state = 1
+        elif 11 <= hour < 17:  # Midday Off-Peak
+            time_state = 2
+        elif 17 <= hour < 21:  # Evening Peak
+            time_state = 3
+        else:  # Late Night Off-Peak (21-24)
+            time_state = 4
+    
             
         return (battery_state, pv_state, load_state, time_state)
     
@@ -350,34 +338,59 @@ class MicrogridState:
 
     def calculate_reward(self, control_dict):
         tariff = self.get_current_tariff()
-        current_hour = self.state_space['time_hour']
         current_soc = self.state_space['battery_soc']
+        is_peak = (7 <= self.state_space['time_hour'] < 11) or (17 <= self.state_space['time_hour'] < 21)
         
-        # Base calculations
+        # Base load cost (always need to import 30 kWh)
         base_cost = 30 * tariff['consumption']
-        charge_percentage = control_dict['battery_charge'] / self.battery_capacity
-        discharge_percentage = control_dict['battery_discharge'] / self.battery_capacity
+        
+       # Calculate percentage of battery charged/discharged
+        charge_percentage = control_dict['battery_charge'] / self.battery_capacity  
+        discharge_percentage = control_dict['battery_discharge'] / self.battery_capacity  
+
+        # Update cost/revenue formulas to be proportional to percentage used
         battery_charge_cost = charge_percentage * tariff['consumption'] * self.battery_capacity
-        battery_export_revenue = discharge_percentage * tariff['injection'] * self.battery_capacity
-        
-        # Calculate immediate financial impact
-        immediate_reward = battery_export_revenue - battery_charge_cost
-        
-        # Add future preparation bonus
-        future_preparation_bonus = 0
-        
-        # If we're in off-peak between peaks (11-17), incentivize charging
-        if 11 <= current_hour < 17:
-            if control_dict['battery_charge'] > 0:
-                future_preparation_bonus = 5 * charge_percentage  # Bonus for charging
-           
-        # If we're approaching peak periods, incentivize having charge
-        if (current_hour in [6, 16]) and current_soc > 0.7:
-            future_preparation_bonus = 4
-        
-        total_reward = immediate_reward + future_preparation_bonus
-        return total_reward, (base_cost + battery_charge_cost - battery_export_revenue)
-        
+
+        # Only calculate export revenue if battery has energy to export
+        if self.state_space['battery_soc'] > 0:
+            battery_export_revenue = discharge_percentage * tariff['injection'] * self.battery_capacity
+        else:
+            battery_export_revenue = 0  # No energy to export
+
+        if self.current_episode == 14990:
+            print(f"\n=== Episode 14990 Cost Calculation Debug ===")
+            print(f"Time: {self.state_space['time_hour']:02d}:00")
+            print(f"Tariff Period: {'Peak' if is_peak else 'Off-Peak'}")
+            print(f"Consumption Tariff: £{tariff['consumption']:.3f}/kWh")
+            print(f"Injection Tariff: £{tariff['injection']:.3f}/kWh")
+            print(f"Battery Discharge: {control_dict['battery_discharge']:.2f} kW")
+            print(f"Grid Export: {control_dict['grid_export']:.2f} kW")
+            print(f"Export Revenue: £{battery_export_revenue:.2f}")
+            print(f"Base Cost: £{base_cost:.2f}")
+            print(f"Battery Charge Cost: £{battery_charge_cost:.2f}")
+            print(f"Net Cost: £{(base_cost + battery_charge_cost - battery_export_revenue):.2f}")
+            print("=" * 50)
+            
+        total_cost = base_cost + battery_charge_cost - battery_export_revenue
+        self.last_cost = total_cost  # Store cost for tracking
+
+    # **🔹 BONUS SYSTEM: Scaled Future Cost Reduction**
+        cost_reduction_bonus = 0  
+
+        if hasattr(self, "previous_cost"):  
+            cost_diff = self.previous_cost - total_cost  # Difference from last step
+            if cost_diff > 0:  
+                cost_reduction_bonus = min(10, cost_diff * 0.2)  # Up to +10 bonus for large improvements
+            elif cost_diff < 0:  
+                cost_reduction_bonus = max(-5, cost_diff * 0.2)  # Small penalty for increases
+
+        self.previous_cost = total_cost  # Update cost for next step
+
+    # **🔹 FINAL REWARD**
+        reward = -total_cost + cost_reduction_bonus  
+
+        return reward, total_cost
+    
     def min_cost(self, pv_generation, load_demand):
         """
         Calculate the theoretical minimum cost for a full day with detailed debugging output
@@ -454,7 +467,7 @@ class MicrogridState:
 class QLearningAgent:
     def __init__(self, n_states, n_actions, learning_rate, discount_factor, epsilon):
         # Calculate the actual state space size based on the discrete state components
-        self.battery_states = 10 # 0 to 9
+        self.battery_states = 10  # 0 to 9
         self.pv_states = 1      # 0 
         self.load_states = 1    # 0 
         self.time_states = 5    # 0 to 4
@@ -466,11 +479,20 @@ class QLearningAgent:
         self.q_table = np.zeros((self.n_states, n_actions))
         
         self.learning_rate = learning_rate
+        self.intial_learning_rate = learning_rate
+        self.min_learning_rate = 0.01
+        self.learning_rate_decay = 0.999
+        
+        
         self.discount_factor = discount_factor
         
         self.epsilon = epsilon
-        self.epsilon_min = 0.05
-        self.epsilon_decay = 0.9999991
+        self.epsilon_min = 0.01
+        self.epsilon_decay = 0.9997
+        
+        self.replay_buffer = []
+        self.replay_buffer_size = 10000
+        self.batch_size = 32
         
         self.exploration_rates = []
         self.episode_count = 0
@@ -490,19 +512,15 @@ class QLearningAgent:
             battery, pv, load, time = state    
             # Verify state components are within bounds
             if not (0 <= battery < self.battery_states):
-                print(f"Battery state {battery} out of bounds [0, {self.battery_states})")
-                return 0
+                raise ValueError(f"Battery state {battery} out of bounds [0, {self.battery_states})")
             if not (0 <= pv < self.pv_states):
-                print(f"PV state {pv} out of bounds [0, {self.pv_states})")
-                return 0
+                raise ValueError(f"PV state {pv} out of bounds [0, {self.pv_states})")
             if not (0 <= load < self.load_states):
-                print(f"Load state {load} out of bounds [0, {self.load_states})")
-                return 0
+                raise ValueError(f"Load state {load} out of bounds [0, {self.load_states})")
             if not (0 <= time < self.time_states):
-                print(f"Time state {time} out of bounds [0, {self.time_states})")
-                return 0
+                raise ValueError(f"Time state {time} out of bounds [0, {self.time_states})")
                 
-            # Calculate unique index using positional value method
+            # Calculate unique index
             index = (battery * (self.pv_states * self.load_states * self.time_states) + 
                     pv * (self.load_states * self.time_states) + 
                     load * self.time_states + 
@@ -513,36 +531,63 @@ class QLearningAgent:
         except Exception as e:
             print(f"Error in get_state_index: {e}")
             print(f"State received: {state}")
-            return 0
+            return ValueError(f"Invalid state: {state}")
 
     def choose_action(self, state):
         try:
             if np.random.random() < self.epsilon:
                 return np.random.randint(0, self.q_table.shape[1])
+                logging.debug(f"Exploring: chose random action {action}")
+                return action
             
             state_idx = self.get_state_index(state)
             return int(np.argmax(self.q_table[state_idx, :]))
+            logging.debug(f"Exploiting: chose action {action} based on Q-values")
+            return action
             
         except Exception as e:
-            print(f"Error in choose_action: {e}")
-            return 0
+            logging.error(f"Error in choose_action: {e}")
+            logging.error(f"Falling back to default action 2 (DO_NOTHING)")
+            return 2
 
     def learn(self, state, action, reward, next_state):
+        """
+        Update Q-values with experience replay and double Q-learning
+        """
         try:
-            state_idx = self.get_state_index(state)
-            next_state_idx = self.get_state_index(next_state)
+            # Store experience
+            self.replay_buffer.append((state, action, reward, next_state))
+            if len(self.replay_buffer) > self.replay_buffer_size:
+                self.replay_buffer.pop(0)
             
-            old_q = self.q_table[state_idx, action]
-            next_max_q = np.max(self.q_table[next_state_idx, :])
+            # Only learn if we have enough experiences
+            if len(self.replay_buffer) < self.batch_size:
+                return
             
-            new_q = (1 - self.learning_rate) * old_q + \
-                    self.learning_rate * (reward + self.discount_factor * next_max_q)
+            # Sample batch from replay buffer
+            batch = random.sample(self.replay_buffer, self.batch_size)
             
-            self.q_table[state_idx, action] = new_q
+            for exp_state, exp_action, exp_reward, exp_next_state in batch:
+                state_idx = self.get_state_index(exp_state)
+                next_state_idx = self.get_state_index(exp_next_state)
+                
+                # Current Q-value
+                current_q = self.q_table[state_idx, exp_action]
+                
+                # Next state maximum Q-value
+                next_max_q = np.max(self.q_table[next_state_idx, :])
+                
+                # Calculate target Q-value with clipping
+                target_q = exp_reward + self.discount_factor * next_max_q
+                target_q = np.clip(target_q, -1000, 1000)
+                
+                # Update Q-value with smaller learning rate
+                self.q_table[state_idx, exp_action] = current_q + \
+                    self.learning_rate * (target_q - current_q)
             
         except Exception as e:
-            print(f"Error in learn: {e}")
-            
+            logging.error(f"Error in learn: {e}")
+
             
     def adaptive_epsilon_decay(self, current_cost, min_cost, tolerance=0.01):
         """
@@ -550,97 +595,152 @@ class QLearningAgent:
         - If costs drop below £92.5 for a sustained period, fix `epsilon` at `epsilon_min`.
         - If costs rise back above £92.5, re-enable exploration.
         """
-        self.recent_costs.append(current_cost)
+        try:
+            
+            self.recent_costs.append(current_cost)
 
         # Maintain a rolling window of costs
-        if len(self.recent_costs) > self.exploration_window:
-            self.recent_costs.pop(0)  # Remove oldest cost
+            if len(self.recent_costs) > self.exploration_window:
+                self.recent_costs.pop(0)  # Remove oldest cost
 
-        avg_recent_cost = np.mean(self.recent_costs)
+            avg_recent_cost = np.mean(self.recent_costs)
 
-        # If average cost is below threshold, set `epsilon` to `epsilon_min`
-        if avg_recent_cost < self.cost_threshold:
-            if not self.switched_to_exploitation:
-                print(f"Switched to full exploitation at episode {self.episode_count} (Avg Cost: £{avg_recent_cost:.2f})")
-                self.switched_to_exploitation = True  # Mark transition
-            self.epsilon = self.epsilon_min  # Keep exploitation mode
-        else:
-            # If costs rise again, re-enable adaptive decay
-            self.switched_to_exploitation = False  
-            decay_rate = 0.9995 if self.episode_count < 10000 else 0.999
-            self.epsilon = max(self.epsilon_min, self.epsilon * decay_rate)
+            # If average cost is below threshold, set `epsilon` to `epsilon_min`
+            if avg_recent_cost < self.cost_threshold:
+                if not self.switched_to_exploitation:
+                    print(f"Switched to full exploitation at episode {self.episode_count} (Avg Cost: £{avg_recent_cost:.2f})")
+                    self.switched_to_exploitation = True  # Mark transition
+                self.epsilon = self.epsilon_min  # Keep exploitation mode
+            else:
+                # If costs rise again, re-enable adaptive decay
+                if self.switched_to_exploitation == False:
+                    logging.info(f"Re-enabling exploration at episode {self.episode_count}")
+                    logging.info(f"Average cost: £{avg_recent_cost:.2f}")
+                    self.switched_to_exploitation = False
+                    
+                decay_rate = 0.9997 if self.episode_count < 15000 else 0.9995  # Adjusted decay rate
+                self.epsilon = max(self.epsilon_min, self.epsilon * decay_rate)
 
-        self.exploration_rates.append(self.epsilon)
-        self.episode_count += 1
-    
-def train_microgrid(env, agent, n_episodes, max_steps, min_cost):
+            self.exploration_rates.append(self.epsilon)
+            self.episode_count += 1
+            
+        except Exception as e:
+                logging.error(f"Error in adaptive_epsilon_decay: {e}")
+            
+                
+def train_microgrid(env, agent, n_episodes, max_steps, min_cost, policy_save_path):
     episode_rewards = []
     episode_costs = []
     env.battery_data = []
-    initial_soc = 1
+    initial_soc = 0.8
+    
+    # Initialize best tracking variables
+    best_cost = float('inf')
+    best_episode = None
+    best_actions = None
+    
+    print(f"\nStarting training for {n_episodes} episodes...")
+    print(f"Theoretical minimum cost: £{min_cost:.2f}")
+    print("=" * 50)
     
     for episode in range(n_episodes):
-        env.current_episode = episode
-        env.current_step = 0
-        
-        # Reset environment state for new episode
-        env.state_space = {
-            'battery_soc': initial_soc,
-            'pv_power': 0.0,
-            'load_demand': 30.0,
-            'time_hour': 0,
-            'net_load': 30.0,
-            'battery_health': 100.0
-        }
-        
-        total_reward = 0
-        total_cost = 0
-        state = env.update_state()
-        episode_data = []
-        
-        for step in range(max_steps):
-            step_data = {
-                'Episode': episode,
-                'Step': step,
-                'Time_Hour': env.state_space['time_hour'],
-                'Battery_SOC': env.state_space['battery_soc'],
-                'PV_Power': env.state_space['pv_power'],
-                'Load_Demand': env.state_space['load_demand'],
-                'Net_Load': env.state_space['net_load'],
+        try:
+            env.current_episode = episode
+            env.current_step = 0
+            
+            # Reset environment state
+            env.state_space = {
+                'battery_soc': initial_soc,
+                'pv_power': 0.0,
+                'load_demand': 30.0,
+                'time_hour': 0,
+                'net_load': 30.0,
+                'battery_health': 100.0
             }
             
-            action = agent.choose_action(state)
-            next_state, reward, done = env.step(action)
-            agent.learn(state, action, reward, next_state)
+            total_reward = 0
+            total_cost = 0
+            state = env.update_state()
+            episode_data = []
+            episode_actions = []
             
-            step_data.update({
-                'Action': action,
-                'Reward': reward,
-            })
-            episode_data.append(step_data)
+            for step in range(max_steps):
+                step_data = {
+                    'Episode': episode,
+                    'Step': step,
+                    'Time_Hour': env.state_space['time_hour'],
+                    'Battery_SOC': env.state_space['battery_soc'],
+                    'PV_Power': env.state_space['pv_power'],
+                    'Load_Demand': env.state_space['load_demand'],
+                    'Net_Load': env.state_space['net_load'],
+                }
+                
+                action = agent.choose_action(state)
+                episode_actions.append(action)
+                next_state, reward, done = env.step(action)
+                agent.learn(state, action, reward, next_state)
+                
+                step_data.update({
+                    'Action': action,
+                    'Reward': reward,
+                })
+                episode_data.append(step_data)
+                
+                total_cost += env.last_cost
+                total_reward += reward
+                state = next_state
+                
+                if done:
+                    break
             
-            total_cost += env.last_cost
-            total_reward += reward
-            state = next_state
+            # Update exploration rate
+            agent.adaptive_epsilon_decay(total_cost, min_cost)
             
-            if done:
-                break
-        
-        # Use adaptive epsilon decay based on performance
-        agent.adaptive_epsilon_decay(total_cost, min_cost)
-        
-        episode_df = pd.DataFrame(episode_data)
-        env.battery_data.append(episode_df)
-        episode_rewards.append(total_reward)
-        episode_costs.append(total_cost)
-        
-        if episode % 10 == 0:
-            print(f"Episode {episode}/{n_episodes} completed. "
-                  f"Total reward: {total_reward:.2f}, "
-                  f"Cost: {total_cost:.2f}, "
-                  f"Epsilon: {agent.epsilon:.3f}")
+            # Store episode data
+            episode_df = pd.DataFrame(episode_data)
+            env.battery_data.append(episode_df)
+            episode_rewards.append(total_reward)
+            episode_costs.append(total_cost)
+            
+            # Update best episode if current episode has lower cost
+            if total_cost < best_cost:
+                best_cost = total_cost
+                best_episode = episode
+                best_actions = episode_actions.copy()
+                
+                # Save the best policy
+                agent.save_policy(policy_save_path)
+                
+                print(f"\nNew best cost found!")
+                print(f"Episode: {episode}")
+                print(f"Cost: £{best_cost:.2f}")
+                print(f"Gap to minimum: {((best_cost - min_cost)/min_cost)*100:.2f}%")
+                print("-" * 30)
+            
+            # Print progress more frequently
+            if episode % 100 == 0:
+                avg_cost = np.mean(episode_costs[-100:]) if len(episode_costs) >= 100 else np.mean(episode_costs)
+                print(f"Episode {episode}/{n_episodes} | "
+                      f"Cost: £{total_cost:.2f} | "
+                      f"Avg Cost (100 ep): £{avg_cost:.2f} | "
+                      f"Epsilon: {agent.epsilon:.3f}")
+                
+        except Exception as e:
+            print(f"Error in episode {episode}: {str(e)}")
+            import traceback
+            print(traceback.format_exc())
+            continue
     
-    return episode_rewards, episode_costs, env.battery_data
+    # Print final results
+    print("\n" + "=" * 50)
+    print("Training Completed!")
+    print(f"Best episode: {best_episode}")
+    print(f"Best cost achieved: £{best_cost:.2f}")
+    print(f"Theoretical minimum cost: £{min_cost:.2f}")
+    print(f"Final gap to minimum: {((best_cost - min_cost)/min_cost)*100:.2f}%")
+    print("=" * 50)
+    
+    return episode_rewards, episode_costs, env.battery_data, best_episode, best_actions
 
 def debug_agent_decisions(env, agent, episode_data: pd.DataFrame, episode_num: int, output_dir: str = "debug_output"):
     """
@@ -1216,14 +1316,15 @@ def main():
     agent = QLearningAgent(
         n_states=50,
         n_actions=3,
-        learning_rate=0.1,
-        discount_factor=0.95,
+        learning_rate=0.2,  # Faster learning rate
+        discount_factor=0.99,
         epsilon=1.0
     )
     
-    n_episodes = 18000
+    n_episodes = 20000  # Adjusted number of episodes
     max_steps_per_episode = 24
     initial_soc = 1
+    policy_save_path = "best_policy.npy"
     
     # Calculate theoretical minimum cost
     load_demand = [30] * 24
@@ -1232,23 +1333,23 @@ def main():
     
     try:
         print("Starting training...")
-        episode_rewards, episode_costs, battery_data = train_microgrid(
+        episode_rewards, episode_costs, battery_data, best_episode, best_actions = train_microgrid(
             env=microgrid_env,
             agent=agent,
             n_episodes=n_episodes,
             max_steps=max_steps_per_episode,
-            min_cost=theoretical_min_cost
+            min_cost=theoretical_min_cost,
+            policy_save_path=policy_save_path
         )
         
         print("Training completed. Creating plots...")
         
         # Debug specific episodes after training is complete
-        episodes_to_debug = [0, 2500, 17990]  # Debug start, middle, and end episodes
+        episodes_to_debug = [0, best_episode, n_episodes-1]
         for episode_num in episodes_to_debug:
-            # Make sure episode_num is within the range of available data
             if episode_num < len(battery_data):
                 debug_agent_decisions(
-                    env=microgrid_env,  # Pass microgrid_env instead of env
+                    env=microgrid_env,
                     agent=agent,
                     episode_data=battery_data[episode_num],
                     episode_num=episode_num
@@ -1256,31 +1357,31 @@ def main():
         
         # Create and save plots
         plot_training_progress(episode_rewards, 
-                             save_path=os.path.join(log_dir, 'training_progress.png'))
+                             save_path=os.path.join("logs", 'training_progress.png'))
         
         plot_soc_across_episodes(
             microgrid_env,  # Use microgrid_env consistently
             battery_data,
-            save_path=os.path.join(log_dir, 'soc_across_episodes.png')
+            save_path=os.path.join("logs", 'soc_across_episodes.png')
         )
         
         plot_tariff_battery_relationship(
             microgrid_env,  # Use microgrid_env consistently
             battery_data,
-            save_path=os.path.join(log_dir, 'tariff_battery_relationship.png')
+            save_path=os.path.join("logs", 'tariff_battery_relationship.png')
         )
         
         plot_battery_actions_soc_comparison(
             microgrid_env,  # Use microgrid_env consistently
             battery_data,
-            save_path=os.path.join(log_dir, 'battery_actions_soc.png')
+            save_path=os.path.join("logs", 'battery_actions_soc.png')
         )
         
         plot_convergence_to_min_cost(
             episode_rewards,
             episode_costs,
             theoretical_min_cost,
-            save_path=os.path.join(log_dir, 'convergence.png')
+            save_path=os.path.join("logs", 'convergence.png')
         )
         
         print("All plots saved successfully.")
