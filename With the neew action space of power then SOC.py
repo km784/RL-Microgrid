@@ -267,6 +267,8 @@ class MicrogridState:
         }
         
         discharge_amount = 0
+        power_to_discharge = 0
+        power_to_charge = 0
         
         if self.current_episode == 14990:
             print(f"\n=== Episode 14990 Action Debug ===")
@@ -883,74 +885,6 @@ def debug_agent_decisions(env, agent, episode_data: pd.DataFrame, episode_num: i
         print(f"No Action: {offpeak_actions.get(2, 0)}")
         
         # Analyze SOC management
-        print("\nSOC Management:")
-        print(f"Average SOC: {episode_data['Battery_SOC'].mean()*100:.1f}%")
-        print(f"Min SOC: {episode_data['Battery_SOC'].min()*100:.1f}%")
-        print(f"Max SOC: {episode_data['Battery_SOC'].max()*100:.1f}%")
-        
-        optimal_range = ((episode_data['Battery_SOC'] >= env.SOC_OPTIMAL_MIN) & 
-                        (episode_data['Battery_SOC'] <= env.SOC_OPTIMAL_MAX))
-        print(f"Time in optimal range: {optimal_range.mean()*100:.1f}%")
-    
-    # 3. Visualize episode behavior
-    def create_episode_visualization():
-        """Create detailed visualization of episode behavior"""
-        fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(15, 12))
-        
-        # Plot 1: Battery SOC
-        ax1.plot(episode_data['Time_Hour'], episode_data['Battery_SOC']*100, 'b-', linewidth=2)
-        ax1.axhline(y=env.SOC_OPTIMAL_MIN*100, color='g', linestyle=':', label='Optimal Min')
-        ax1.axhline(y=env.SOC_OPTIMAL_MAX*100, color='g', linestyle=':', label='Optimal Max')
-        
-        # Shade peak periods
-        for start, end in [(7,11), (17,21)]:
-            ax1.axvspan(start, end, color='yellow', alpha=0.2)
-        
-        ax1.set_ylabel('Battery SOC (%)')
-        ax1.grid(True)
-        ax1.legend()
-        
-        # Plot 2: Actions taken
-        colors = {0: 'green', 1: 'red', 2: 'gray'}
-        for idx, row in episode_data.iterrows():
-            ax2.scatter(row['Time_Hour'], row['Action'], 
-                       color=colors[row['Action']], s=100)
-        
-        ax2.set_yticks([0, 1, 2])
-        ax2.set_yticklabels(['Charge', 'Discharge', 'No Action'])
-        ax2.set_ylabel('Actions')
-        ax2.grid(True)
-        
-        # Plot 3: Q-values for chosen actions
-        for action in range(3):
-            q_values = []
-            for idx, row in episode_data.iterrows():
-                state = (1, 0, 0, 1 if (7 <= row['Time_Hour'] < 11) or 
-                        (17 <= row['Time_Hour'] < 21) else 0)
-                state_idx = agent.get_state_index(state)
-                q_values.append(agent.q_table[state_idx, action])
-            ax3.plot(episode_data['Time_Hour'], q_values, 
-                    label=['Charge', 'Discharge', 'No Action'][action])
-        
-        ax3.set_xlabel('Hour of Day')
-        ax3.set_ylabel('Q-Values')
-        ax3.grid(True)
-        ax3.legend()
-        
-        plt.tight_layout()
-        plt.savefig(f"{output_dir}/episode_{episode_num}_analysis.png")
-        plt.close()
-    
-    # Run all analyses
-    print(f"\n{'='*50}")
-    print(f"Debugging Episode {episode_num}")
-    print(f"{'='*7000}")
-    
-    analyze_q_values()
-    analyze_episode_decisions()
-    create_episode_visualization()
-    
-    print(f"\nDebug visualizations saved to {output_dir}/episode_{episode_num}_analysis.png")
 
 
 def plot_training_progress(episode_rewards, save_path=None):
@@ -1403,7 +1337,7 @@ def main():
         epsilon=1.2
     )
     
-    n_episodes = 31500  # Adjusted number of episodes
+    n_episodes = 15000  # Adjusted number of episodes
     max_steps_per_episode = 24
     initial_soc = 1
     policy_save_path = "best_policy.npy"
